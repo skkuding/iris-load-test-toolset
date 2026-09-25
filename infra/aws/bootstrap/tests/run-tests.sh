@@ -32,8 +32,14 @@ account="219857217698"
 prefix="codedang-iris-benchmark"
 deployer="${prefix}-deployer"
 role="${prefix}-terraform"
-policy_name="${prefix}-terraform-permissions"
-policy_arn="arn:aws:iam::${account}:policy/${policy_name}"
+policy_suffixes=(backend data iam-network)
+policy_names=()
+policy_arns=()
+for suffix in "${policy_suffixes[@]}"; do
+  policy_names+=("${prefix}-terraform-permissions-${suffix}")
+  policy_arns+=("arn:aws:iam::${account}:policy/${prefix}-terraform-permissions-${suffix}")
+done
+role_policy_count="${#policy_names[@]}"
 
 failures=0
 pass() { printf 'ok: %s\n' "$*"; }
@@ -84,9 +90,9 @@ assert_contains "simulation; no access key created" "${run_out}" "first run veri
 assert_eq "1" "$(count_log 'sts get-caller-identity')" "caller identity resolved once"
 assert_eq "1" "$(count_log 'iam create-user')" "user created once"
 assert_eq "1" "$(count_log 'iam create-role')" "role created once"
-assert_eq "1" "$(count_log 'iam create-policy')" "customer-managed policy created once"
+assert_eq "${role_policy_count}" "$(count_log 'iam create-policy ')" "customer-managed policies created once each"
 assert_eq "1" "$(count_log 'iam put-user-policy')" "user inline policy written once"
-assert_eq "1" "$(count_log 'iam attach-role-policy')" "role policy attached once"
+assert_eq "${role_policy_count}" "$(count_log 'iam attach-role-policy')" "role policies attached once each"
 assert_eq "1" "$(count_log 'iam simulate-principal-policy')" "assume-role simulated"
 assert_eq "0" "$(count_log 'iam create-access-key')" "no access key created by default"
 
@@ -119,13 +125,18 @@ assert_eq "sts:AssumeRole" \
   "$(jq -r '.AssumeRolePolicyDocument.Statement[0].Action' "${FAKE_AWS_STATE_DIR}/role.json")" \
   "role trust allows only sts:AssumeRole"
 
-assert_eq "${policy_arn}" \
-  "$(jq -r '.[0]' "${FAKE_AWS_STATE_DIR}/attached-role.json")" \
-  "customer-managed policy attached to the role"
+assert_eq "${role_policy_count}" \
+  "$(jq -r 'length' "${FAKE_AWS_STATE_DIR}/attached-role.json")" \
+  "every customer-managed policy attached to the role"
+for policy_arn in "${policy_arns[@]}"; do
+  assert_eq "1" \
+    "$(jq -r --arg a "${policy_arn}" '[.[] | select(. == $a)] | length' "${FAKE_AWS_STATE_DIR}/attached-role.json")" \
+    "attached policy: ${policy_arn##*/}"
+done
 
-# The customer-managed policy must be the only place Terraform permissions live
-# and must cover the required tight scopes.
-role_policy_doc="$(jq -c '.Document' "${FAKE_AWS_STATE_DIR}/policy.json")"
+# The customer-managed policies must be the only place Terraform permissions
+# live and must cover the required tight scopes.
+role_policy_doc="$(jq -c '[.[] | .Document]' "${FAKE_AWS_STATE_DIR}/policies.json")"
 assert_contains '"TerraformBackendStateObject"' "${role_policy_doc}" "state object statement present"
 assert_contains "${prefix}" "${role_policy_doc}" "policy is benchmark-prefix scoped"
 if grep -Fq '"Action":["*"]' <<<"${role_policy_doc}" || grep -Fq '"Action": "*"' <<<"${role_policy_doc}"; then
@@ -139,12 +150,12 @@ assert_not_contains "__" "${role_policy_doc}" "role policy has no unrendered pla
 
 : >"${FAKE_AWS_LOG}"
 run_out="$("${bootstrap}" --yes --admin-profile bootstrap-admin 2>&1)"
-assert_contains "customer-managed policy is current" "${run_out}" "second run reports the policy is current"
+assert_contains "customer-managed policy is current" "${run_out}" "second run reports the policies are current"
 assert_eq "0" "$(count_log 'iam create-user')" "second run does not recreate the user"
 assert_eq "0" "$(count_log 'iam create-role')" "second run does not recreate the role"
-assert_eq "0" "$(count_log 'iam create-policy ')" "second run does not recreate the policy"
+assert_eq "0" "$(count_log 'iam create-policy ')" "second run does not recreate the policies"
 assert_eq "0" "$(count_log 'iam create-policy-version')" "second run does not add a policy version"
-assert_eq "0" "$(count_log 'iam attach-role-policy')" "second run does not re-attach the policy"
+assert_eq "0" "$(count_log 'iam attach-role-policy')" "second run does not re-attach the policies"
 
 # --- Exclusivity enforcement -------------------------------------------------
 
@@ -174,8 +185,39 @@ assert_eq "0" \
   "$(jq -r 'map(select(test("Foreign")))|length' "${FAKE_AWS_STATE_DIR}/attached-user.json")" \
   "no foreign managed user policy remains"
 assert_eq "0" \
+  "$(jq -r 'map(select(test("Foreign")))|length' "${FAKE_AWS_STATE_DIR}/attached-role.json")" \
+  "no foreign managed role policy remains"
+for policy_arn in "${policy_arns[@]}"; do
+  assert_eq "1" \
+    "$(jq -r --arg a "${policy_arn}" '[.[] | select(. == $a)] | length' "${FAKE_AWS_STATE_DIR}/attached-role.json")" \
+    "wanted policy retained: ${policy_arn##*/}"
+done
+assert_eq "0" \
   "$(jq -r 'length' "${FAKE_AWS_STATE_DIR}/inline-role.json")" \
   "no foreign inline role policy remains"
+
+# --- Recovery from a partially completed bootstrap ---------------------------
+# Simulate the failure this refactor fixes: the user, role, and trust policy
+# already exist but the role has no customer-managed policies because the single
+# oversized CreatePolicy call failed. A retry must converge without recreating
+# the user or role.
+
+rm -f "${FAKE_AWS_STATE_DIR}/policies.json"
+echo '[]' >"${FAKE_AWS_STATE_DIR}/attached-role.json"
+echo '{}' >"${FAKE_AWS_STATE_DIR}/inline-role.json"
+: >"${FAKE_AWS_LOG}"
+run_out="$("${bootstrap}" --yes --admin-profile bootstrap-admin 2>&1)"
+assert_contains "bootstrap complete" "${run_out}" "retry after partial bootstrap completes"
+assert_eq "0" "$(count_log 'iam create-user')" "retry does not recreate the existing user"
+assert_eq "0" "$(count_log 'iam create-role')" "retry does not recreate the existing role"
+assert_eq "${role_policy_count}" "$(count_log 'iam create-policy ')" "retry creates every missing policy"
+assert_eq "${role_policy_count}" "$(count_log 'iam attach-role-policy')" "retry attaches every missing policy"
+assert_eq "${role_policy_count}" \
+  "$(jq -r 'length' "${FAKE_AWS_STATE_DIR}/attached-role.json")" \
+  "retry leaves all policies attached"
+assert_eq "0" \
+  "$(jq -r 'map(select(test("Foreign")))|length' "${FAKE_AWS_STATE_DIR}/attached-role.json")" \
+  "retry attaches no foreign policy"
 
 # --- Access key creation, no-print, fail-safe, rotation ----------------------
 

@@ -11,9 +11,12 @@ assumable role. The identities are:
 - IAM user `codedang-iris-benchmark-deployer` — the only permission it carries
   is `sts:AssumeRole` on the Terraform role;
 - IAM role `codedang-iris-benchmark-terraform` — trusts only that user and
-  carries one customer-managed policy with every Terraform permission;
-- customer-managed policy `codedang-iris-benchmark-terraform-permissions` —
-  attached to the role, never to the user.
+  carries a set of customer-managed policies covering every Terraform
+  permission;
+- customer-managed policies
+  `codedang-iris-benchmark-terraform-permissions-<suffix>` — attached to the
+  role, never to the user. Permissions are split across the set so each
+  rendered document stays below the IAM 6144-character non-whitespace limit.
 
 ## Files
 
@@ -23,12 +26,19 @@ infra/aws/bootstrap/
 ├── policies/
 │   ├── deployer-assume-role-policy.json      # user inline policy (sts:AssumeRole only)
 │   ├── terraform-role-trust-policy.json      # role trust policy (deployer user only)
-│   └── terraform-role-policy.json            # customer-managed role permissions
+│   ├── terraform-role-policy-backend.json    # customer-managed: state/lock/identity
+│   ├── terraform-role-policy-data.json       # customer-managed: RDS/KMS/secrets
+│   └── terraform-role-policy-iam-network.json # customer-managed: S3/IAM/EC2
 └── tests/
     ├── fake-aws/aws                          # stateful fake AWS CLI (no network)
     ├── run-tests.sh                          # fake-AWS integration tests
-    └── validate-policies.sh                  # policy JSON/render/scoping checks
+    └── validate-policies.sh                  # policy JSON/render/size/scoping checks
 ```
+
+Each `terraform-role-policy-<suffix>.json` template becomes the customer-managed
+policy `${name_prefix}-terraform-permissions-<suffix>`. Add a template with a new
+suffix to extend the set; the script discovers, renders, creates, versions, tags,
+and attaches every template it finds.
 
 The policy JSON files contain `__PLACEHOLDER__` tokens. The script renders them
 with the resolved account, region, prefix, state bucket/key, lock table,
@@ -43,7 +53,7 @@ Run from the repository root with an administrative profile:
 # Show the resolved plan without touching AWS.
 scripts/aws/bootstrap-deployer.sh --dry-run --account-id <ACCOUNT_ID>
 
-# Bootstrap the user, role, and customer-managed policy. No access key.
+# Bootstrap the user, role, and customer-managed policies. No access key.
 scripts/aws/bootstrap-deployer.sh --admin-profile <ADMIN_PROFILE> --yes
 
 # Optional: create an access key and import the local profile.
@@ -63,7 +73,7 @@ AWS_PROFILE=codedang-iris-benchmark-deployer \
   terraform -chdir=infra/aws/iris-benchmark init
 ```
 
-Run it a second time to confirm idempotence. The customer-managed policy update
+Run it a second time to confirm idempotence. Each customer-managed policy update
 is guarded by a `PolicyDocumentHash` tag so an unchanged policy is not versioned
 again.
 
@@ -98,10 +108,11 @@ infra/aws/bootstrap/tests/run-tests.sh
 ```
 
 `validate-policies.sh` renders the templates with sample values and checks JSON
-validity, required actions, tight resource scoping, no wildcard actions, and no
-credential material. `run-tests.sh` drives the script against a stateful fake
-AWS CLI and checks creation, idempotence, exclusivity, access-key handling,
-secret non-disclosure, and fail-safe behavior.
+validity, per-policy 6144-character non-whitespace size, required actions, tight
+resource scoping, no wildcard actions, and no credential material. `run-tests.sh`
+drives the script against a stateful fake AWS CLI and checks creation,
+idempotence, exclusivity, recovery from a partially completed bootstrap,
+access-key handling, secret non-disclosure, and fail-safe behavior.
 
 ## Residual permission risks
 

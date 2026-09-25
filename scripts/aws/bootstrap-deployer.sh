@@ -9,10 +9,11 @@
 #       - the user is granted ONLY sts:AssumeRole on the Terraform role;
 #   * IAM role   codedang-iris-benchmark-terraform
 #       - trusts only that user;
-#       - carries one customer-managed policy with every Terraform permission.
+#       - carries a set of customer-managed policies with every Terraform
+#         permission, split so each stays under the IAM 6144-character limit.
 #
 # The user never receives direct Terraform permissions. All Terraform access
-# lives in the customer-managed policy attached to the role.
+# lives in the customer-managed policies attached to the role.
 #
 # Optional access key handling:
 #   --create-access-key   Create an access key for the user and import it into a
@@ -114,7 +115,7 @@ cleanup() {
 trap cleanup EXIT
 
 usage() {
-  sed -n '2,73p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,75p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 while [ $# -gt 0 ]; do
@@ -162,9 +163,21 @@ require_cmd jq
 
 [ -d "${policies_dir}" ] || die "policy directory not found: ${policies_dir}"
 user_policy_src="${policies_dir}/deployer-assume-role-policy.json"
-role_policy_src="${policies_dir}/terraform-role-policy.json"
 trust_policy_src="${policies_dir}/terraform-role-trust-policy.json"
-for f in "${user_policy_src}" "${role_policy_src}" "${trust_policy_src}"; do
+
+# Role permissions are split across a set of customer-managed policies so each
+# rendered document stays below the IAM 6144-character policy size limit. The
+# suffix after "terraform-role-policy-" names the corresponding managed policy.
+role_policy_templates=()
+while IFS= read -r f; do
+  [ -n "${f}" ] || continue
+  role_policy_templates+=("${f}")
+done < <(find "${policies_dir}" -maxdepth 1 -type f -name 'terraform-role-policy-*.json' | LC_ALL=C sort)
+
+[ "${#role_policy_templates[@]}" -ge 2 ] ||
+  die "expected at least two terraform-role-policy-*.json templates in ${policies_dir}"
+
+for f in "${user_policy_src}" "${trust_policy_src}" "${role_policy_templates[@]}"; do
   [ -f "${f}" ] || die "policy file not found: ${f}"
 done
 
@@ -188,11 +201,13 @@ render_policy() {
 }
 
 render_all() {
-  local dir="$1"
+  local dir="$1" tpl
   mkdir -p "${dir}"
   render_policy "${user_policy_src}" "${dir}/deployer-assume-role-policy.json"
-  render_policy "${role_policy_src}" "${dir}/terraform-role-policy.json"
   render_policy "${trust_policy_src}" "${dir}/terraform-role-trust-policy.json"
+  for tpl in "${role_policy_templates[@]}"; do
+    render_policy "${tpl}" "${dir}/$(basename "${tpl}")"
+  done
 }
 
 canonical_hash() {
@@ -222,6 +237,7 @@ if [ "${dry_run}" = "true" ]; then
   log "dry-run: region         = ${region}"
   log "dry-run: deployer user  = ${deployer_user}"
   log "dry-run: terraform role = ${terraform_role}"
+  log "dry-run: role policies  = ${#role_policy_templates[@]} (${name_prefix}-terraform-permissions-*)"
   log "dry-run: local profile  = ${local_profile}"
   log "dry-run: role profile   = ${role_profile}"
   log "dry-run: state bucket   = ${state_bucket}"
@@ -269,11 +285,23 @@ render_all "${work_dir}"
 user_arn="arn:aws:iam::${account_id}:user/${deployer_user}"
 role_arn="arn:aws:iam::${account_id}:role/${terraform_role}"
 user_inline_policy="${name_prefix}-assume-terraform"
-policy_name="${name_prefix}-terraform-permissions"
-policy_arn="arn:aws:iam::${account_id}:policy/${policy_name}"
+
+# Resolve the set of customer-managed role policies from the template names. The
+# rendered file basename (minus the template prefix) is the policy suffix.
+role_policy_names=()
+role_policy_arns=()
+role_policy_files=()
+for tpl in "${role_policy_templates[@]}"; do
+  base="$(basename "${tpl}" .json)"
+  suffix="${base#terraform-role-policy-}"
+  role_policy_names+=("${name_prefix}-terraform-permissions-${suffix}")
+  role_policy_arns+=("arn:aws:iam::${account_id}:policy/${name_prefix}-terraform-permissions-${suffix}")
+  role_policy_files+=("${base}.json")
+done
 
 log "bootstrap: account=${account_id} region=${region}"
 log "bootstrap: user=${deployer_user} role=${terraform_role}"
+log "bootstrap: role policies=${#role_policy_names[@]} (${name_prefix}-terraform-permissions-*)"
 
 if [ "${assume_yes}" != "true" ]; then
   confirm "Bootstrap IAM user ${deployer_user} and role ${terraform_role} in ${account_id}?" ||
@@ -338,38 +366,50 @@ aws_admin iam tag-role --role-name "${terraform_role}" \
   "Key=Environment,Value=benchmark" \
   "Key=ManagedBy,Value=bootstrap-deployer" >/dev/null
 
-# --- Customer-managed role policy --------------------------------------------
+# --- Customer-managed role policies ------------------------------------------
 
-desired_hash="$(canonical_hash "${work_dir}/terraform-role-policy.json")"
+# Each policy in the set is created or versioned independently. The
+# PolicyDocumentHash tag records the canonical rendered document so an unchanged
+# policy is not versioned again.
+for i in "${!role_policy_names[@]}"; do
+  policy_name="${role_policy_names[$i]}"
+  policy_arn="${role_policy_arns[$i]}"
+  rendered_policy="${work_dir}/${role_policy_files[$i]}"
+  desired_hash="$(canonical_hash "${rendered_policy}")"
 
-if aws_admin iam get-policy --policy-arn "${policy_arn}" >/dev/null 2>&1; then
-  current_hash="$(aws_admin iam list-policy-tags --policy-arn "${policy_arn}" |
-    jq -r '[.Tags[]? | select(.Key == "PolicyDocumentHash") | .Value][0] // ""')"
-  if [ "${current_hash}" != "${desired_hash}" ]; then
-    log "updating customer-managed policy: ${policy_name}"
-    aws_admin iam create-policy-version --policy-arn "${policy_arn}" \
-      --policy-document "file://${work_dir}/terraform-role-policy.json" \
-      --set-as-default >/dev/null
-    aws_admin iam tag-policy --policy-arn "${policy_arn}" \
-      --tags "Key=PolicyDocumentHash,Value=${desired_hash}" >/dev/null
+  if aws_admin iam get-policy --policy-arn "${policy_arn}" >/dev/null 2>&1; then
+    current_hash="$(aws_admin iam list-policy-tags --policy-arn "${policy_arn}" |
+      jq -r '[.Tags[]? | select(.Key == "PolicyDocumentHash") | .Value][0] // ""')"
+    if [ "${current_hash}" != "${desired_hash}" ]; then
+      log "updating customer-managed policy: ${policy_name}"
+      aws_admin iam create-policy-version --policy-arn "${policy_arn}" \
+        --policy-document "file://${rendered_policy}" \
+        --set-as-default >/dev/null
+      aws_admin iam tag-policy --policy-arn "${policy_arn}" \
+        --tags "Key=PolicyDocumentHash,Value=${desired_hash}" >/dev/null
+    else
+      log "customer-managed policy is current: ${policy_name}"
+    fi
   else
-    log "customer-managed policy is current: ${policy_name}"
+    log "creating customer-managed policy: ${policy_name}"
+    aws_admin iam create-policy --policy-name "${policy_name}" \
+      --description "Terraform permissions (${role_policy_files[$i]}) for the codedang-iris-benchmark deployer role." \
+      --policy-document "file://${rendered_policy}" \
+      --tags "Key=Project,Value=${name_prefix}" \
+      "Key=Environment,Value=benchmark" \
+      "Key=ManagedBy,Value=bootstrap-deployer" \
+      "Key=PolicyDocumentHash,Value=${desired_hash}" >/dev/null
   fi
-else
-  log "creating customer-managed policy: ${policy_name}"
-  aws_admin iam create-policy --policy-name "${policy_name}" \
-    --description "All Terraform permissions for the codedang-iris-benchmark deployer role." \
-    --policy-document "file://${work_dir}/terraform-role-policy.json" \
-    --tags "Key=Project,Value=${name_prefix}" \
-    "Key=Environment,Value=benchmark" \
-    "Key=ManagedBy,Value=bootstrap-deployer" \
-    "Key=PolicyDocumentHash,Value=${desired_hash}" >/dev/null
-fi
+done
 
 if [ "${enforce_exclusive}" = "true" ]; then
+  declare -A wanted_role_policy_arns=()
+  for policy_arn in "${role_policy_arns[@]}"; do
+    wanted_role_policy_arns["${policy_arn}"]=1
+  done
   while IFS= read -r attached_arn; do
     [ -n "${attached_arn}" ] || continue
-    [ "${attached_arn}" = "${policy_arn}" ] && continue
+    [ -n "${wanted_role_policy_arns[${attached_arn}]:-}" ] && continue
     log "detaching unexpected role policy: ${attached_arn}"
     aws_admin iam detach-role-policy --role-name "${terraform_role}" --policy-arn "${attached_arn}" >/dev/null
   done < <(aws_admin iam list-attached-role-policies --role-name "${terraform_role}" | jq -r '.AttachedPolicies[]?.PolicyArn')
@@ -380,12 +420,17 @@ if [ "${enforce_exclusive}" = "true" ]; then
   done < <(aws_admin iam list-role-policies --role-name "${terraform_role}" | jq -r '.PolicyNames[]?')
 fi
 
-already_attached="$(aws_admin iam list-attached-role-policies --role-name "${terraform_role}" |
-  jq -r '.AttachedPolicies[]?.PolicyArn' | grep -Fx "${policy_arn}" || true)"
-if [ -z "${already_attached}" ]; then
+attached_role_policy_arns="$(aws_admin iam list-attached-role-policies --role-name "${terraform_role}" |
+  jq -r '.AttachedPolicies[]?.PolicyArn')"
+for i in "${!role_policy_names[@]}"; do
+  policy_name="${role_policy_names[$i]}"
+  policy_arn="${role_policy_arns[$i]}"
+  if grep -Fxq "${policy_arn}" <<<"${attached_role_policy_arns}"; then
+    continue
+  fi
+  log "attaching policy ${policy_name} to ${terraform_role}"
   aws_admin iam attach-role-policy --role-name "${terraform_role}" --policy-arn "${policy_arn}" >/dev/null
-  log "attached policy ${policy_name} to ${terraform_role}"
-fi
+done
 
 # --- Optional access key and verification -------------------------------------
 

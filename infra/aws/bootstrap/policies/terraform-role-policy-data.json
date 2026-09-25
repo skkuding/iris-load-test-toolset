@@ -1,0 +1,164 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadBenchmarkAndSourceSnapshots",
+      "Effect": "Allow",
+      "Action": [
+        "rds:DescribeDBSnapshots",
+        "rds:DescribeDBSnapshotAttributes",
+        "rds:DescribeDBSnapshotTenantDatabases",
+        "rds:ListTagsForResource"
+      ],
+      "Resource": [
+        "__SOURCE_SNAPSHOT_ARN__",
+        "arn:aws:rds:__REGION__:__ACCOUNT_ID__:snapshot:__NAME_PREFIX__*"
+      ]
+    },
+    {
+      "Sid": "CopyExplicitSourceSnapshot",
+      "Effect": "Allow",
+      "Action": [
+        "rds:CopyDBSnapshot",
+        "rds:AddTagsToResource"
+      ],
+      "Resource": [
+        "__SOURCE_SNAPSHOT_ARN__",
+        "arn:aws:rds:__REGION__:__ACCOUNT_ID__:snapshot:__NAME_PREFIX__*"
+      ]
+    },
+    {
+      "Sid": "ManageBenchmarkRds",
+      "Effect": "Allow",
+      "Action": [
+        "rds:CreateDBInstance",
+        "rds:ModifyDBInstance",
+        "rds:DeleteDBInstance",
+        "rds:DescribeDBInstances",
+        "rds:RestoreDBInstanceFromDBSnapshot",
+        "rds:CreateDBParameterGroup",
+        "rds:ModifyDBParameterGroup",
+        "rds:DeleteDBParameterGroup",
+        "rds:DescribeDBParameterGroups",
+        "rds:DescribeDBParameters",
+        "rds:CreateDBSubnetGroup",
+        "rds:ModifyDBSubnetGroup",
+        "rds:DeleteDBSubnetGroup",
+        "rds:DescribeDBSubnetGroups",
+        "rds:CreateDBSnapshot",
+        "rds:DeleteDBSnapshot",
+        "rds:ModifyDBSnapshot",
+        "rds:ModifyDBSnapshotAttribute",
+        "rds:AddTagsToResource",
+        "rds:RemoveTagsFromResource",
+        "rds:DescribeDBEngineVersions",
+        "rds:DescribeOrderableDBInstanceOptions",
+        "rds:DescribeDBInstanceAutomatedBackups"
+      ],
+      "Resource": [
+        "arn:aws:rds:__REGION__:__ACCOUNT_ID__:db:__NAME_PREFIX__*",
+        "arn:aws:rds:__REGION__:__ACCOUNT_ID__:pg:__NAME_PREFIX__*",
+        "arn:aws:rds:__REGION__:__ACCOUNT_ID__:subgrp:__NAME_PREFIX__*",
+        "arn:aws:rds:__REGION__:__ACCOUNT_ID__:snapshot:__NAME_PREFIX__*"
+      ]
+    },
+    {
+      "Sid": "CreateBenchmarkKmsKey",
+      "Effect": "Allow",
+      "Action": [
+        "kms:CreateKey"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestTag/Project": "__NAME_PREFIX__"
+        }
+      }
+    },
+    {
+      "Sid": "ManageBenchmarkKmsKeyTagged",
+      "Effect": "Allow",
+      "Action": [
+        "kms:DescribeKey",
+        "kms:GetKeyPolicy",
+        "kms:PutKeyPolicy",
+        "kms:GetKeyRotationStatus",
+        "kms:EnableKeyRotation",
+        "kms:DisableKeyRotation",
+        "kms:TagResource",
+        "kms:UntagResource",
+        "kms:ListResourceTags",
+        "kms:EnableKey",
+        "kms:DisableKey",
+        "kms:ScheduleKeyDeletion",
+        "kms:CancelKeyDeletion",
+        "kms:CreateGrant",
+        "kms:ListGrants",
+        "kms:RevokeGrant",
+        "kms:Encrypt",
+        "kms:Decrypt",
+        "kms:ReEncryptFrom",
+        "kms:ReEncryptTo",
+        "kms:GenerateDataKey",
+        "kms:GenerateDataKeyWithoutPlaintext"
+      ],
+      "Resource": [
+        "arn:aws:kms:__REGION__:__ACCOUNT_ID__:key/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/Project": "__NAME_PREFIX__"
+        }
+      }
+    },
+    {
+      "Sid": "ManageBenchmarkKmsAlias",
+      "Effect": "Allow",
+      "Action": [
+        "kms:CreateAlias",
+        "kms:UpdateAlias",
+        "kms:DeleteAlias",
+        "kms:ListAliases"
+      ],
+      "Resource": [
+        "arn:aws:kms:__REGION__:__ACCOUNT_ID__:alias/__NAME_PREFIX__*"
+      ]
+    },
+    {
+      "Sid": "ManageBenchmarkSecrets",
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:CreateSecret",
+        "secretsmanager:DeleteSecret",
+        "secretsmanager:DescribeSecret",
+        "secretsmanager:GetSecretValue",
+        "secretsmanager:PutSecretValue",
+        "secretsmanager:UpdateSecret",
+        "secretsmanager:RestoreSecret",
+        "secretsmanager:TagResource",
+        "secretsmanager:UntagResource",
+        "secretsmanager:ListTagsForResource",
+        "secretsmanager:GetResourcePolicy",
+        "secretsmanager:PutResourcePolicy",
+        "secretsmanager:DeleteResourcePolicy",
+        "secretsmanager:ListSecretVersionIds",
+        "secretsmanager:CancelRotateSecret",
+        "secretsmanager:RotateSecret"
+      ],
+      "Resource": [
+        "arn:aws:secretsmanager:__REGION__:__ACCOUNT_ID__:secret:__NAME_PREFIX__*"
+      ]
+    },
+    {
+      "Sid": "ReadRdsManagedMasterSecret",
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:DescribeSecret",
+        "secretsmanager:GetSecretValue"
+      ],
+      "Resource": [
+        "arn:aws:secretsmanager:__REGION__:__ACCOUNT_ID__:secret:rds!db-*"
+      ]
+    }
+  ]
+}

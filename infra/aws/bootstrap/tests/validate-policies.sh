@@ -65,16 +65,45 @@ else
 fi
 
 user_policy="${rendered}/deployer-assume-role-policy.json"
-role_policy="${rendered}/terraform-role-policy.json"
 trust_policy="${rendered}/terraform-role-trust-policy.json"
 
-for f in "${user_policy}" "${role_policy}" "${trust_policy}"; do
+role_policies=()
+while IFS= read -r f; do
+  [ -n "${f}" ] || continue
+  role_policies+=("${f}")
+done < <(find "${rendered}" -maxdepth 1 -type f -name 'terraform-role-policy-*.json' | LC_ALL=C sort)
+
+if [ "${#role_policies[@]}" -ge 2 ]; then
+  pass "role permissions are split across ${#role_policies[@]} policy documents"
+else
+  fail "expected at least two rendered terraform-role-policy-*.json documents"
+fi
+
+for f in "${user_policy}" "${trust_policy}" "${role_policies[@]}"; do
   if jq -e . "${f}" >/dev/null 2>&1; then
     pass "valid rendered JSON: $(basename "${f}")"
   else
     fail "invalid rendered JSON: $(basename "${f}")"
   fi
 done
+
+# --- IAM policy size limit ---------------------------------------------------
+# IAM rejects a customer-managed policy whose non-whitespace document exceeds
+# 6144 characters. Assert every rendered document stays clear of the limit.
+
+for f in "${role_policies[@]}"; do
+  compact_size="$(jq -c . "${f}" | tr -d '[:space:]' | wc -c | tr -d '[:space:]')"
+  if [ "${compact_size}" -le 6144 ]; then
+    pass "policy size ${compact_size} <= 6144: $(basename "${f}")"
+  else
+    fail "policy size ${compact_size} exceeds 6144: $(basename "${f}")"
+  fi
+done
+
+# Combine the split documents for whole-set coverage and scoping checks.
+all_role_policies="${tmp}/terraform-role-policies-combined.json"
+jq -s '{Version: "2012-10-17", Statement: [.[].Statement[]]}' \
+  "${role_policies[@]}" >"${all_role_policies}"
 
 # --- Deployer user policy: only sts:AssumeRole on the role -------------------
 
@@ -97,12 +126,12 @@ assert_jq "${trust_policy}" \
   '.Statement[0].Principal.AWS == "arn:aws:iam::'"${sample_account}"':user/'"${sample_prefix}"'-deployer"' \
   "trust policy names only the deployer user"
 
-# --- Role policy: required coverage and tight scoping ------------------------
+# --- Role policies: required coverage and tight scoping ----------------------
 
-assert_jq "${role_policy}" '.Version == "2012-10-17"' "role policy has the IAM policy version"
-assert_jq "${role_policy}" '.Statement | length > 0' "role policy has statements"
+assert_jq "${all_role_policies}" '.Version == "2012-10-17"' "role policies use the IAM policy version"
+assert_jq "${all_role_policies}" '.Statement | length > 0' "role policies have statements"
 
-role_actions="$(jq -r '[.Statement[] | .Action] | flatten | unique[]' "${role_policy}")"
+role_actions="$(jq -r '[.Statement[] | .Action] | flatten | unique[]' "${all_role_policies}")"
 required_actions=(
   "s3:GetObject"
   "s3:PutObject"
@@ -130,11 +159,11 @@ for action in "${required_actions[@]}"; do
   fi
 done
 
-assert_jq "${role_policy}" \
+assert_jq "${all_role_policies}" \
   '[.Statement[] | select(.Effect == "Allow") | (.Action | if type == "array" then .[] else . end) | select(. == "*")] | length == 0' \
-  "role policy has no wildcard action"
+  "role policies have no wildcard action"
 
-assert_jq "${role_policy}" '
+assert_jq "${all_role_policies}" '
   [ .Statement[]
     | select(.Effect == "Allow")
     | select(
@@ -149,23 +178,23 @@ assert_jq "${role_policy}" '
   ] | length == 0
 ' "sensitive role-policy actions are never scoped to a wildcard resource"
 
-rendered_text="$(cat "${role_policy}")"
+rendered_text="$(cat "${all_role_policies}")"
 for needle in \
   "${sample_state_key}" \
   "${sample_lock_table}" \
   "${sample_source_snapshot_arn}" \
   "${sample_prefix}"; do
   if grep -Fq -- "${needle}" <<<"${rendered_text}"; then
-    pass "role policy references ${needle}"
+    pass "role policies reference ${needle}"
   else
-    fail "role policy is missing ${needle}"
+    fail "role policies are missing ${needle}"
   fi
 done
 
-if grep -Eq '__[A-Z_]+__' "${rendered}"/terraform-role-policy.json; then
-  fail "role policy has unrendered placeholders"
+if grep -Eq '__[A-Z_]+__' "${role_policies[@]}"; then
+  fail "role policies have unrendered placeholders"
 else
-  pass "role policy has no unrendered placeholders"
+  pass "role policies have no unrendered placeholders"
 fi
 
 if grep -RIn -E 'AKIA[0-9A-Z]{16}|aws_secret_access_key|BEGIN [A-Z ]*PRIVATE KEY' \

@@ -56,6 +56,11 @@ doc_from() {
   fi
 }
 
+policy_name_from_arn() {
+  local arn="$1"
+  printf '%s' "${arn##*:policy/}"
+}
+
 parse_tags() {
   local -a toks=()
   while [ $# -gt 0 ]; do
@@ -224,9 +229,11 @@ if [ "${svc}" = "iam" ]; then
     echo '{}'
     ;;
   "iam get-policy")
-    if [ -f "${state}/policy.json" ]; then
-      jq -n --slurpfile p "${state}/policy.json" \
-        '{Policy: {Arn: $p[0].Arn, PolicyName: $p[0].PolicyName, DefaultVersionId: $p[0].DefaultVersionId}}'
+    parn="$(flag --policy-arn "$@" || true)"
+    pname="$(policy_name_from_arn "${parn}")"
+    if [ -f "${state}/policies.json" ] && jq -e --arg n "${pname}" 'has($n)' "${state}/policies.json" >/dev/null; then
+      jq -n --slurpfile p "${state}/policies.json" --arg n "${pname}" \
+        '{Policy: {Arn: $p[0][$n].Arn, PolicyName: $n, DefaultVersionId: $p[0][$n].DefaultVersionId}}'
     else
       echo "fake-aws: no such policy" >&2
       exit 254
@@ -236,31 +243,39 @@ if [ "${svc}" = "iam" ]; then
     name="$(flag --policy-name "$@" || true)"
     doc="$(doc_from "$@")"
     tags="$(parse_tags "$@")"
-    jq -n --arg n "${name}" --arg acct "${acct}" --argjson doc "${doc}" --argjson tags "${tags}" \
-      '{Arn:("arn:aws:iam::"+$acct+":policy/"+$n),PolicyName:$n,DefaultVersionId:"v1",Document:$doc,Tags:$tags,VersionCount:1}' \
-      >"${state}/policy.json"
-    jq -n --slurpfile p "${state}/policy.json" \
-      '{Policy: {Arn: $p[0].Arn, PolicyName: $p[0].PolicyName, DefaultVersionId: $p[0].DefaultVersionId}}'
+    [ -f "${state}/policies.json" ] && base="$(cat "${state}/policies.json")" || base='{}'
+    jq --arg n "${name}" --arg acct "${acct}" --argjson doc "${doc}" --argjson tags "${tags}" \
+      '. + {($n): {Arn:("arn:aws:iam::"+$acct+":policy/"+$n),PolicyName:$n,DefaultVersionId:"v1",Document:$doc,Tags:$tags,VersionCount:1}}' \
+      <<<"${base}" >"${state}/policies.json"
+    jq -n --slurpfile p "${state}/policies.json" --arg n "${name}" \
+      '{Policy: {Arn: $p[0][$n].Arn, PolicyName: $n, DefaultVersionId: $p[0][$n].DefaultVersionId}}'
     ;;
   "iam list-policy-tags")
-    if [ -f "${state}/policy.json" ]; then
-      jq -n --slurpfile p "${state}/policy.json" '{Tags: ($p[0].Tags // [])}'
+    parn="$(flag --policy-arn "$@" || true)"
+    pname="$(policy_name_from_arn "${parn}")"
+    if [ -f "${state}/policies.json" ] && jq -e --arg n "${pname}" 'has($n)' "${state}/policies.json" >/dev/null; then
+      jq -n --slurpfile p "${state}/policies.json" --arg n "${pname}" '{Tags: ($p[0][$n].Tags // [])}'
     else
       echo '{"Tags":[]}'
     fi
     ;;
   "iam tag-policy")
+    parn="$(flag --policy-arn "$@" || true)"
+    pname="$(policy_name_from_arn "${parn}")"
     tags="$(parse_tags "$@")"
-    jq --argjson t "${tags}" '.Tags = $t' "${state}/policy.json" >"${state}/policy.json.tmp"
-    mv "${state}/policy.json.tmp" "${state}/policy.json"
+    jq --arg n "${pname}" --argjson t "${tags}" '.[$n].Tags = $t' "${state}/policies.json" >"${state}/policies.json.tmp"
+    mv "${state}/policies.json.tmp" "${state}/policies.json"
     echo '{}'
     ;;
   "iam create-policy-version")
+    parn="$(flag --policy-arn "$@" || true)"
+    pname="$(policy_name_from_arn "${parn}")"
     doc="$(doc_from "$@")"
-    jq --argjson doc "${doc}" '.Document = $doc | .VersionCount += 1 | .DefaultVersionId = ("v" + (.VersionCount | tostring))' \
-      "${state}/policy.json" >"${state}/policy.json.tmp"
-    mv "${state}/policy.json.tmp" "${state}/policy.json"
-    jq -n --slurpfile p "${state}/policy.json" '{PolicyVersion: {VersionId: $p[0].DefaultVersionId}}'
+    jq --arg n "${pname}" --argjson doc "${doc}" \
+      '.[$n].Document = $doc | .[$n].VersionCount += 1 | .[$n].DefaultVersionId = ("v" + (.[$n].VersionCount | tostring))' \
+      "${state}/policies.json" >"${state}/policies.json.tmp"
+    mv "${state}/policies.json.tmp" "${state}/policies.json"
+    jq -n --slurpfile p "${state}/policies.json" --arg n "${pname}" '{PolicyVersion: {VersionId: $p[0][$n].DefaultVersionId}}'
     ;;
   "iam list-access-keys")
     if [ -f "${state}/keys.json" ]; then
