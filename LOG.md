@@ -93,10 +93,15 @@ host qualification/provisioning foundation.
 - 2026-09-25: Uploaded and checksum-verified the six fixture objects in the
   versioned, SSE-KMS bucket `codedang-iris-benchmark-testcases`. A read-only role
   independently listed the 568 prefix and verified `hidden=false` tagging.
+- 2026-09-25: Final validation passed: Go tests/vet/formatting, AWS script and
+  policy tests, fixture verification, Terraform formatting/validation/static
+  safety checks, Ansible topology tests and syntax checks, and repository secret
+  scanning. Terraform refresh reports no infrastructure actions; it only offers
+  to persist the managed-master-secret ARN as a new output after the one-time
+  RDS credential reconciliation.
 
 ## Current Work
 
-- Finish operator documentation and repository-wide validation.
 - Run read-only qualification on server8 before any provisioning decision.
 - Resolve the Judger containment blocker before accepting measurements.
 
