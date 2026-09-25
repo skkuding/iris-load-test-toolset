@@ -36,6 +36,21 @@ func TestDecodeAppliesDefaults(t *testing.T) {
 	}
 }
 
+func TestDecodeAcceptsExplicitSSHControlPath(t *testing.T) {
+	doc := strings.Replace(minimal, `"hosts"`, `"paths": {"sshControlPath": "~/.ssh/sockets/codedang8.sock"}, "hosts"`, 1)
+	cfg, err := Decode([]byte(doc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Paths.SSHControlPath != "~/.ssh/sockets/codedang8.sock" {
+		t.Fatalf("sshControlPath = %q", cfg.Paths.SSHControlPath)
+	}
+	bad := strings.Replace(minimal, `"hosts"`, "\"paths\": {\"sshControlPath\": \"bad\\nvalue\"}, \"hosts\"", 1)
+	if _, err := Decode([]byte(bad)); err == nil {
+		t.Fatal("Decode accepted a control path containing a newline")
+	}
+}
+
 func TestDecodeRejectsUnknownField(t *testing.T) {
 	bad := strings.Replace(minimal, `"schemaVersion": 1,`, `"schemaVersion": 1, "mystery": true,`, 1)
 	if _, err := Decode([]byte(bad)); err == nil {

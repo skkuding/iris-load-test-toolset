@@ -25,10 +25,11 @@ type sshDownloader interface {
 func cmdCollect(args []string) error {
 	fs := newFlagSet("collect")
 	var (
-		configPath = fs.String("config", "", "configuration JSON file")
-		host       = fs.String("host", "", "target SSH alias")
-		runID      = fs.String("run", "", "run id to collect")
-		remoteRoot = fs.String("remote-var-root", "/var/lib/iris-bench", "remote non-secret state root")
+		configPath     = fs.String("config", "", "configuration JSON file")
+		host           = fs.String("host", "", "target SSH alias")
+		runID          = fs.String("run", "", "run id to collect")
+		remoteRoot     = fs.String("remote-var-root", "/var/lib/iris-bench", "remote non-secret state root")
+		sshControlPath = fs.String("ssh-control-path", "", "explicit OpenSSH ControlPath")
 	)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -46,7 +47,7 @@ func cmdCollect(args []string) error {
 	if _, ok := cfg.AllowedHost(*host); !ok {
 		return fmt.Errorf("host %q is not allowlisted", *host)
 	}
-	return collectRun(context.Background(), cfg, *host, *remoteRoot, *runID, makeSSH(cfg, *host))
+	return collectRun(context.Background(), cfg, *host, *remoteRoot, *runID, makeSSH(cfg, *host, *sshControlPath))
 }
 
 // collectRun downloads, verifies, scans, and manifests a run bundle. It takes

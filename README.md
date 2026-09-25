@@ -218,6 +218,7 @@ values. Example files: `config/profiles.json` and `config/run.example.json`.
     "runRoot": "/run/iris-bench",
     "binRoot": "/opt/iris-bench/bin",
     "socketDir": "~/.ssh/sockets",
+    "sshControlPath": "",          // optional explicit ControlPath (e.g. an operator socket)
     "resultRoot": "runs"
   },
   "limits": {
@@ -284,10 +285,17 @@ implementation. For each host it builds:
   and does not read a socket path from the environment. Ansible uses
   `ControlPath=~/.ssh/sockets/%h.sock` (`ansible/ansible.cfg`), where `%h`
   expands to the host's canonical name, not necessarily the inventory alias.
-- Consequence: an operator's existing socket is reused only if its path matches
-  what a tool builds. Use key/agent auth, or create the socket at the expected
-  path (for example a symlink). The operator's aliases, `ProxyJump`, and
-  host-key policy still apply.
+- To reuse an operator's existing socket directly, set an explicit control path:
+  `paths.sshControlPath` in the config, or the `--ssh-control-path` flag on
+  `plan`/`run`/`collect`/`status`. When set it replaces the derived
+  `ControlPath` (a leading `~` is expanded; the path must be absolute and short
+  enough for a unix socket). This is the supported way to point the controller
+  at a socket such as `~/.ssh/sockets/codedang8.sock`.
+- Ansible builds `ControlPath` from `ansible/ansible.cfg`. To use the same
+  operator socket there, override `ssh_args` for the run, for example
+  `ANSIBLE_SSH_ARGS='-o ControlPath=~/.ssh/sockets/codedang8.sock -o ControlMaster=auto -o ControlPersist=3600'`,
+  or provide key/agent auth. The operator's aliases, `ProxyJump`, and host-key
+  policy still apply.
 
 The transport only places validated remote tokens on the command line; plan
 JSON and other untrusted data travel over stdin. Remote paths must be absolute

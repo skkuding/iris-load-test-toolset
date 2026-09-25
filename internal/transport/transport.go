@@ -36,6 +36,7 @@ type Options struct {
 	SSHBinary      string
 	SCPBinary      string
 	SocketDir      string
+	ControlPath    string
 	BatchMode      bool
 	ConnectTimeout int
 	ControlPersist string
@@ -74,6 +75,9 @@ func (o Options) Validate() error {
 	if strings.ContainsAny(o.ControlPersist, "\x00\n\r ") {
 		return errors.New("transport: invalid control persist value")
 	}
+	if strings.ContainsAny(o.ControlPath, "\x00\n\r") {
+		return errors.New("transport: invalid control path")
+	}
 	return nil
 }
 
@@ -107,6 +111,21 @@ func (s SSH) SocketPath() (string, error) {
 	opts := s.Opts.withDefaults()
 	if s.Host == "" {
 		return "", errors.New("transport: empty host")
+	}
+	// An explicit ControlPath (operator-provided socket) takes precedence over
+	// the derived per-host name.
+	if opts.ControlPath != "" {
+		p, err := ExpandSocketDir(opts.ControlPath)
+		if err != nil {
+			return "", err
+		}
+		if len(p) >= 104 {
+			return "", fmt.Errorf("transport: control socket path too long: %q", p)
+		}
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			return "", fmt.Errorf("transport: create socket dir: %w", err)
+		}
+		return p, nil
 	}
 	dir, err := ExpandSocketDir(opts.SocketDir)
 	if err != nil {

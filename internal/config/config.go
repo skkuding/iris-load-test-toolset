@@ -70,6 +70,10 @@ type Paths struct {
 	BinRoot    string `json:"binRoot,omitempty"`
 	SocketDir  string `json:"socketDir,omitempty"`
 	ResultRoot string `json:"resultRoot,omitempty"`
+	// SSHControlPath optionally pins the exact OpenSSH ControlPath. When set it
+	// overrides the derived "<socketDir>/iris-bench-<host>" so an operator's
+	// existing control socket can be reused. A leading "~" is expanded.
+	SSHControlPath string `json:"sshControlPath,omitempty"`
 }
 
 // Limits bounds run scope.
@@ -228,6 +232,9 @@ func (c Config) Validate() error {
 	}
 	if c.Paths.SocketDir == "" {
 		return errors.New("config: paths.socketDir is required")
+	}
+	if strings.ContainsAny(c.Paths.SSHControlPath, "\x00\n\r") {
+		return errors.New("config: paths.sshControlPath contains control characters")
 	}
 	if c.Limits.MaxWorkers < 1 {
 		return errors.New("config: limits.maxWorkers must be positive")

@@ -36,6 +36,44 @@ func TestSocketPathUnderHomeSockets(t *testing.T) {
 	}
 }
 
+func TestSocketPathExplicitControlPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	s := SSH{
+		Host: "codedang8",
+		Opts: Options{
+			BatchMode:      true,
+			ConnectTimeout: 15,
+			ControlPath:    "~/.ssh/sockets/codedang8.sock",
+		},
+	}
+	p, err := s.SocketPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(home, ".ssh", "sockets", "codedang8.sock")
+	if p != want {
+		t.Fatalf("socket path = %q, want %q", p, want)
+	}
+	args, err := s.BaseArgs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "ControlPath="+want) {
+		t.Fatalf("BaseArgs missing explicit ControlPath: %v", args)
+	}
+}
+
+func TestSocketPathRejectsRelativeControlPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	s := SSH{Host: "codedang8", Opts: Options{ControlPath: "relative.sock"}}
+	if _, err := s.SocketPath(); err == nil {
+		t.Fatal("expected error for relative control path")
+	}
+}
+
 func TestBaseArgsControlPath(t *testing.T) {
 	s, home := sshForTest(t)
 	args, err := s.BaseArgs()

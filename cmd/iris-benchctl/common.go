@@ -40,6 +40,7 @@ type planOptions struct {
 	resolveImage     bool
 	seed             int64
 	fixtures         stringList
+	sshControlPath   string
 }
 
 func (o *planOptions) register(fs *flag.FlagSet) {
@@ -54,6 +55,7 @@ func (o *planOptions) register(fs *flag.FlagSet) {
 	fs.BoolVar(&o.resolveImage, "resolve-image", false, "resolve the Iris tag with docker buildx imagetools")
 	fs.Int64Var(&o.seed, "seed", 1, "run random seed")
 	fs.Var(&o.fixtures, "fixture", "fixture name=path (repeatable)")
+	fs.StringVar(&o.sshControlPath, "ssh-control-path", "", "explicit OpenSSH ControlPath (default <socketDir>/iris-bench-<host>)")
 }
 
 func loadConfig(path string) (config.Config, error) {
@@ -208,11 +210,15 @@ func agentPath(cfg config.Config, override string) string {
 	return filepath.Join(cfg.Paths.BinRoot, toolVersion, "iris-bench-agent")
 }
 
-func makeSSH(cfg config.Config, host string) transport.SSH {
+func makeSSH(cfg config.Config, host, controlPath string) transport.SSH {
+	if controlPath == "" {
+		controlPath = cfg.Paths.SSHControlPath
+	}
 	return transport.SSH{
 		Host: host,
 		Opts: transport.Options{
 			SocketDir:      cfg.Paths.SocketDir,
+			ControlPath:    controlPath,
 			BatchMode:      true,
 			ConnectTimeout: transport.DefaultConnectTimeout,
 		},

@@ -109,7 +109,7 @@ func cmdRun(args []string) error {
 		return fmt.Errorf("suite %q is not supported in this build; only the direct judger suite is implemented", plan.Suite)
 	}
 
-	ssh := makeSSH(cfg, o.host)
+	ssh := makeSSH(cfg, o.host, o.sshControlPath)
 	baseArgs := direct.agentArgs()
 	newInvoker := func(extra []string) agentInvoker {
 		remoteArgs := append(append([]string(nil), baseArgs...), extra...)
