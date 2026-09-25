@@ -100,8 +100,17 @@ host qualification/provisioning foundation.
   to persist the managed-master-secret ARN as a new output after the one-time
   RDS credential reconciliation.
 
+- 2026-09-25: Added `docs/WAVE1-REPLICATION.md`, the operator manual for
+  reproducing the original Wave 1 experiment. It records the original k8s
+  method (Track A) from the plan/log and the current standalone toolset path
+  (Track B), with the environment fact that server8 is detached from the
+  production cluster. It is intentionally derived from `PROPOSE.md` and this
+  log, not from the unrun repetition harness.
+
 ## Current Work
 
+- Validate `docs/WAVE1-REPLICATION.md` with repeated fresh-operator runs and
+  refine it from their gap reports.
 - Run read-only qualification on server8 before any provisioning decision.
 - Resolve the Judger containment blocker before accepting measurements.
 
