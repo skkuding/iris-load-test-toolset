@@ -1,0 +1,54 @@
+# Example variables for infra/aws/iris-benchmark.
+#
+# Copy to terraform.tfvars (gitignored) and replace every placeholder. Never
+# commit terraform.tfvars, real secrets, or resolved connection strings.
+
+region       = "ap-northeast-2"
+name_prefix  = "codedang-iris-benchmark"
+
+# Required ownership placeholders.
+cost_owner     = "REPLACE_ME_COST_CENTER"
+resource_owner = "REPLACE_ME_OWNER"
+
+# Benchmark data generation. Bump when restoring a new checkpoint.
+benchmark_generation = "v1"
+
+# Source production instance (read-only reference and tags only).
+source_db_identifier = "terraform-20250506182211604800000001"
+
+# Concrete snapshot identifier. Discover it read-only with:
+#   scripts/aws/discover-rds-snapshot.sh --format id
+# Do not use "latest" or select a snapshot implicitly at apply time.
+source_snapshot_identifier  = "rds:terraform-20250506182211604800000001-2026-09-24-16-05"
+source_snapshot_arn         = "arn:aws:rds:ap-northeast-2:219857217698:snapshot:rds:terraform-20250506182211604800000001-2026-09-24-16-05"
+benchmark_snapshot_identifier = "codedang-iris-benchmark-source-20260924"
+
+# Network: default denies all clients. Add only approved benchmark/controller
+# addresses, for example "203.0.113.7/32".
+benchmark_allowed_cidrs = ["115.145.172.197/32"]
+
+# Source was publicly accessible for on-premise Iris; keep the security group
+# allowlist narrow.
+publicly_accessible = true
+
+# Optional IAM principals allowed to assume the read-only testcase role for
+# short-lived STS credentials.
+assume_role_principal_arns = ["arn:aws:iam::219857217698:user/tasoo-skkuding-claude"]
+
+# Source-compatible overrides (defaults mirror the production instance).
+# instance_class             = "db.t4g.small"
+# engine_version             = "18.4"
+# allocated_storage          = 30
+# max_allocated_storage      = 100
+# storage_type               = "gp3"
+# app_db_name                = "skkuding"
+# port                       = 5433
+# parameter_group_family     = "postgres18"
+# backup_retention_period    = 7
+# backup_window              = "16:00-17:00"
+# availability_zone          = "ap-northeast-2b"
+# deletion_protection        = true
+# performance_insights_enabled = true
+# testcase_bucket_name       = "codedang-iris-benchmark-testcases"
+# testcase_problem_ids       = ["568", "569", "570"]
+# readonly_db_username       = "benchmark_ro"

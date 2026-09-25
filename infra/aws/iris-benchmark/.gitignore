@@ -1,0 +1,16 @@
+# Terraform working data. Lock files are intentionally NOT ignored; keep them.
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+.terraformrc
+terraform.rc
+
+# Real variable values may contain identifiers, CIDRs, and principals.
+*.tfvars
+*.tfvars.json
+!terraform.tfvars.example
