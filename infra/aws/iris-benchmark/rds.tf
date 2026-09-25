@@ -58,6 +58,8 @@ resource "aws_db_instance" "benchmark" {
   allocated_storage          = var.allocated_storage
   max_allocated_storage      = var.max_allocated_storage
   storage_type               = var.storage_type
+  storage_encrypted          = true
+  kms_key_id                 = aws_kms_key.benchmark.arn
   parameter_group_name       = aws_db_parameter_group.benchmark.name
   port                       = var.port
 
