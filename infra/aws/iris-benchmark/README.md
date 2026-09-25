@@ -31,6 +31,28 @@ the Codedang VPC outputs only to reuse DB subnets.
 - The testcase bucket has `prevent_destroy`, versioning, KMS encryption, and a
   full public access block.
 
+## KMS key policy
+
+`kms.tf` attaches an explicit least-privilege policy to the benchmark key
+instead of relying on the KMS default. It:
+
+- preserves the account-root IAM delegation statement so the Terraform deployer
+  role (and any future in-account administrator) can keep administering the
+  key through its scoped IAM policy;
+- allows RDS and Database Insights (Performance Insights) to create grants on
+  the caller's behalf with `kms:GrantIsForAWSResource = true` and
+  `kms:ViaService = rds.<region>.amazonaws.com`;
+- allows RDS/Database Insights to decrypt and generate data keys through the
+  same ViaService;
+- allows Secrets Manager to encrypt and decrypt the RDS-managed master user
+  secret; and
+- allows S3 to apply SSE-KMS to the testcase bucket.
+
+It deliberately does not add service-principal (`"Service": ...`) grants, which
+AWS does not document for customer managed key policies. If the key policy is
+updated, keep the root delegation statement or the deployer loses access to the
+key, and keep the ViaService conditions aligned with the benchmark region.
+
 ## Workflow
 
 ```bash

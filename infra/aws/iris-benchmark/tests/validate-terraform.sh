@@ -72,6 +72,53 @@ else
   fail "testcase_problem_ids is not referenced"
 fi
 
+# --- KMS key policy ----------------------------------------------------------
+
+kms_tf="${module_dir}/kms.tf"
+rds_tf="${module_dir}/rds.tf"
+
+if grep -Eq 'policy[[:space:]]*=[[:space:]]*data\.aws_iam_policy_document\.benchmark_kms\.json' "${kms_tf}"; then
+  pass "benchmark key has an explicit key policy"
+else
+  fail "benchmark key policy is not wired to data.aws_iam_policy_document.benchmark_kms"
+fi
+
+if grep -Fq 'EnableIamUserPermissions' "${kms_tf}" &&
+  grep -Fq 'kms:*' "${kms_tf}" &&
+  grep -Fq ':root' "${kms_tf}"; then
+  pass "key policy preserves account-root IAM delegation"
+else
+  fail "key policy must keep the account-root IAM delegation statement"
+fi
+
+for via_service in rds secretsmanager s3; do
+  if grep -Fq 'kms:ViaService' "${kms_tf}" &&
+    grep -Fq "${via_service}.\${var.region}.amazonaws.com" "${kms_tf}"; then
+    pass "key policy scopes ${via_service} use with kms:ViaService"
+  else
+    fail "key policy is missing the ${via_service} kms:ViaService condition"
+  fi
+done
+
+if grep -Fq 'kms:GrantIsForAWSResource' "${kms_tf}"; then
+  pass "key policy limits service grants with kms:GrantIsForAWSResource"
+else
+  fail "key policy must condition kms:CreateGrant with kms:GrantIsForAWSResource"
+fi
+
+if grep -Eq 'type[[:space:]]*=[[:space:]]*"Service"' "${kms_tf}"; then
+  fail "key policy uses broad service-principal grants unsupported by AWS docs"
+else
+  pass "key policy uses no service-principal grants"
+fi
+
+if grep -Fq 'master_user_secret_kms_key_id = aws_kms_key.benchmark.arn' "${rds_tf}" &&
+  grep -Fq 'performance_insights_kms_key_id = var.performance_insights_enabled ? aws_kms_key.benchmark.arn : null' "${rds_tf}"; then
+  pass "RDS managed secret and Performance Insights use the benchmark key"
+else
+  fail "RDS must encrypt the managed master secret and Performance Insights with the benchmark key"
+fi
+
 # --- Terraform CLI checks ----------------------------------------------------
 
 if command -v terraform >/dev/null 2>&1; then

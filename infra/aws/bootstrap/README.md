@@ -150,6 +150,19 @@ These are known trade-offs in the granted policy. Review them before applying.
 - KMS key management is scoped to `key/*` with a `aws:ResourceTag/Project`
   condition. If a key is created without the tag, subsequent management calls
   fail; Terraform tags the key, so keep `common_tags` on the key.
+- Service-driven KMS use is granted separately from key management:
+  `kms:CreateGrant` requires `kms:GrantIsForAWSResource = true` and a
+  `kms:ViaService` value for RDS, Secrets Manager, or S3, while
+  `kms:DescribeKey`/`kms:Decrypt`/`kms:GenerateDataKey*` require the same
+  `kms:ViaService`. This is what lets RDS create the grant for
+  `manage_master_user_password` and Performance Insights; a bare
+  `aws:ResourceTag` condition on those actions does not. The key's own key
+  policy must also allow the services, which
+  `infra/aws/iris-benchmark/kms.tf` does through the same ViaService pattern.
+- The S3 bucket statement uses the exact `s3:PutEncryptionConfiguration` IAM
+  action for the `PutBucketEncryption` API. `s3:PutBucketEncryption`,
+  `s3:GetBucketEncryption`, and `s3:DeleteBucketEncryption` are not valid IAM
+  actions and were removed.
 - The RDS-managed master secret created by `manage_master_user_password` is not
   benchmark-prefixed. Reading it is scoped to `secret:rds!db-*`, which could
   match other RDS-managed secrets in the account. Narrow this when the concrete

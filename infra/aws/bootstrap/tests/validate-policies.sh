@@ -138,6 +138,8 @@ required_actions=(
   "s3:GetObject"
   "s3:PutObject"
   "s3:DeleteObject"
+  "s3:PutEncryptionConfiguration"
+  "s3:GetEncryptionConfiguration"
   "dynamodb:GetItem"
   "dynamodb:PutItem"
   "dynamodb:DeleteItem"
@@ -149,7 +151,10 @@ required_actions=(
   "kms:CreateAlias"
   "kms:UpdateAlias"
   "kms:ListAliases"
+  "kms:CreateGrant"
+  "kms:DescribeKey"
   "kms:Decrypt"
+  "kms:GenerateDataKey"
   "secretsmanager:GetSecretValue"
   "iam:CreateRole"
   "iam:CreatePolicy"
@@ -225,6 +230,28 @@ assert_jq "${all_role_policies}" '
   ] | length > 0
 ' "kms:ListAliases is granted on the account-wide resource"
 
+# kms:CreateGrant is authorized only for grants that an AWS service creates on
+# the account's behalf, and only through the benchmark services.
+assert_jq "${all_role_policies}" '
+  [ .Statement[]
+    | select(.Effect == "Allow")
+    | select(([.Action] | flatten) | index("kms:CreateGrant"))
+    | select(((.Condition // {})["Bool"]["kms:GrantIsForAWSResource"]) == true)
+    | select(((.Condition // {})["StringEquals"]["kms:ViaService"] // [])
+             | (type == "array" and index("rds.'"${sample_region}"'.amazonaws.com") != null)
+               or (type == "string" and . == "rds.'"${sample_region}"'.amazonaws.com"))
+  ] | length > 0
+' "kms:CreateGrant is limited to AWS-service grants through kms:ViaService"
+
+# Service-driven cryptographic use is limited to the benchmark ViaServices.
+assert_jq "${all_role_policies}" '
+  [ .Statement[]
+    | select(.Effect == "Allow")
+    | select(([.Action] | flatten) | any(. == "kms:Decrypt" or . == "kms:GenerateDataKey"))
+    | select(((.Condition // {})["StringEquals"]["kms:ViaService"] // []) | length > 0)
+  ] | length > 0
+' "kms:Decrypt and kms:GenerateDataKey are conditioned on kms:ViaService"
+
 # RDS tag reads are needed for the instance, parameter group, subnet group,
 # and snapshots.
 assert_jq "${all_role_policies}" '
@@ -253,6 +280,28 @@ assert_jq "${all_role_policies}" '
     | select(test("^arn:aws:s3:::'"${sample_prefix}"'-testcases$") | not)
   ] | length == 0
 ' "S3 bucket read/config actions are scoped to the benchmark bucket"
+
+# s3:PutBucketEncryption and s3:DeleteBucketEncryption are not valid IAM
+# actions; PutBucketEncryption is authorized by s3:PutEncryptionConfiguration.
+assert_jq "${all_role_policies}" '
+  [ .Statement[]
+    | ([.Action] | flatten)[]
+    | select(. == "s3:PutBucketEncryption"
+          or . == "s3:DeleteBucketEncryption"
+          or . == "s3:GetBucketEncryption")
+  ] | length == 0
+' "invalid S3 bucket-encryption IAM actions are absent"
+
+# The exact PutBucketEncryption IAM action must stay on the dedicated bucket.
+assert_jq "${all_role_policies}" '
+  [ .Statement[]
+    | select(.Effect == "Allow")
+    | select(([.Action] | flatten) | index("s3:PutEncryptionConfiguration"))
+    | ([.Resource] | flatten)[]
+  ] as $r
+  | (($r | length) > 0)
+    and ($r | all(test("^arn:aws:s3:::'"${sample_prefix}"'-testcases$")))
+' "s3:PutEncryptionConfiguration is scoped to the benchmark bucket"
 
 # ec2:CreateSecurityGroup authorizes against the VPC as well as the security
 # group, so the benchmark VPC ARN must be granted explicitly and not widened.

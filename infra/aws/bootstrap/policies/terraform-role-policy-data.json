@@ -97,13 +97,46 @@
         "kms:DisableKey",
         "kms:ScheduleKeyDeletion",
         "kms:CancelKeyDeletion",
-        "kms:CreateGrant",
         "kms:ListGrants",
-        "kms:RevokeGrant",
-        "kms:Encrypt",
+        "kms:RevokeGrant"
+      ],
+      "Resource": [
+        "arn:aws:kms:__REGION__:__ACCOUNT_ID__:key/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/Project": "__NAME_PREFIX__"
+        }
+      }
+    },
+    {
+      "Sid": "CreateBenchmarkKmsGrantsForAwsServices",
+      "Effect": "Allow",
+      "Action": [
+        "kms:CreateGrant"
+      ],
+      "Resource": [
+        "arn:aws:kms:__REGION__:__ACCOUNT_ID__:key/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "kms:ViaService": [
+            "rds.__REGION__.amazonaws.com",
+            "secretsmanager.__REGION__.amazonaws.com",
+            "s3.__REGION__.amazonaws.com"
+          ]
+        },
+        "Bool": {
+          "kms:GrantIsForAWSResource": true
+        }
+      }
+    },
+    {
+      "Sid": "UseBenchmarkKmsKeyForAwsServices",
+      "Effect": "Allow",
+      "Action": [
+        "kms:DescribeKey",
         "kms:Decrypt",
-        "kms:ReEncryptFrom",
-        "kms:ReEncryptTo",
         "kms:GenerateDataKey",
         "kms:GenerateDataKeyWithoutPlaintext"
       ],
@@ -112,7 +145,11 @@
       ],
       "Condition": {
         "StringEquals": {
-          "aws:ResourceTag/Project": "__NAME_PREFIX__"
+          "kms:ViaService": [
+            "rds.__REGION__.amazonaws.com",
+            "secretsmanager.__REGION__.amazonaws.com",
+            "s3.__REGION__.amazonaws.com"
+          ]
         }
       }
     },
