@@ -64,8 +64,12 @@ infra/aws/iris-benchmark/   dedicated Terraform module and tests
 - AWS CLI v2 and `jq`. The database scripts need a PostgreSQL client: either
   `psql` on `PATH`, or `scripts/aws/psql-container.sh` with a container runtime
   (see [Export, manifest, upload](#export-manifest-upload)).
-- Docker with `buildx`, only when resolving an image tag with `--resolve-image`.
-- OpenSSH client and the operator's existing host aliases and sockets.
+- Docker with `buildx` when resolving an image tag with `--resolve-image` and
+  when building `images/judger-bench.Dockerfile`. A container runtime (default
+  `podman`) or `psql` is needed for the database scripts.
+- OpenSSH client and the operator's existing host aliases and sockets. The
+  controller requires **non-interactive** auth (`BatchMode=yes`); verify with
+  `ssh -o BatchMode=yes -o ConnectTimeout=15 <alias> true`.
 
 ## Build and test
 
@@ -289,8 +293,8 @@ These are driven by Ansible, not by `iris-benchctl provision`/`qualify` (both
 unimplemented).
 
 ```bash
-# Read-only qualification of the approved host (no mutation).
-scripts/qualify-host.sh codedang8
+# Read-only, but become: true and post-provision assertions; needs a password.
+scripts/qualify-host.sh codedang8 --ask-become-pass
 
 # Provision and verify (requires sudo; interactive become password).
 ANSIBLE_CONFIG=ansible/ansible.cfg \
@@ -559,6 +563,8 @@ Run from the repository root:
 go build ./... && go vet ./... && go test ./...
 fixtures/tests/verify-fixtures.sh
 scripts/aws/tests/run-tests.sh
+infra/aws/bootstrap/tests/run-tests.sh
+infra/aws/bootstrap/tests/validate-policies.sh
 infra/aws/iris-benchmark/tests/validate-terraform.sh          # or --static-only
 ANSIBLE_CONFIG=ansible/ansible.cfg ANSIBLE_ROLES_PATH=ansible/roles \
   ansible-playbook ansible/playbooks/qualify_host.yml \

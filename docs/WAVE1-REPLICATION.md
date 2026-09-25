@@ -2,6 +2,14 @@
 
 Last reviewed: 2026-09-25
 
+> **Read this first — what is reproducible today.** In this build, only local
+> integrity checks, host planning, and dry-run inspection are reproducible from
+> the repository alone. The full measurement path is blocked and must not be
+> promised: Track A artifacts are not in this repository, the full-Iris/AMQP
+> ladder is unimplemented, controller-side agent staging is missing, and the
+> Judger containment gate fails closed. Expect `plan` and `run --dry-run` to
+> work and a real accepted run to be impossible until those gates are resolved.
+
 This is the operator manual for reproducing the original **Wave 1** Iris
 runtime-reproducibility experiment. It is written so that a new operator, on a
 different machine, can use this repository alone. The private benchmark plan and
@@ -95,13 +103,14 @@ Common:
   committed to the repository).
 - Docker with `buildx` **only** if you use `--resolve-image` or build
   `images/judger-bench.Dockerfile`; otherwise supply digests explicitly.
-- An SSH alias/host-key entry for the benchmark host, and a working
-  non-interactive path to it. **Verify it before anything else.** The controller
-  builds its own control socket (`paths.socketDir`, default `~/.ssh/sockets`,
-  socket name `iris-bench-<host>`); Ansible uses
-  `ControlPath=~/.ssh/sockets/%h.sock`. These are different names, so an
-  operator socket you already have (for example `codedang8.sock`) is **not**
-  automatically reused. Configure a key or your own `ControlPath` and confirm.
+- An SSH alias/host-key entry for the benchmark host and a working
+  **non-interactive** path to it. The controller sets `BatchMode=yes` and builds
+  its own control socket: `paths.socketDir` (default `~/.ssh/sockets`) plus
+  socket name `iris-bench-<host>` (no `.sock`). Ansible instead uses
+  `ControlPath=~/.ssh/sockets/%h.sock`; for an inventory host named `codedang8`
+  that resolves to exactly `~/.ssh/sockets/codedang8.sock`. So Ansible *does*
+  reuse an existing `codedang8.sock`, but the controller does not. Verify before
+  anything else: `ssh -o BatchMode=yes -o ConnectTimeout=15 codedang8 true`.
 - Optional: `cp .env.example .env` to load the documented non-secret names,
   endpoints, and ARNs locally. `.env` is git-ignored.
 - For qualification/provisioning: `sudo`/become access on the host. Server hosts
@@ -267,8 +276,9 @@ When Track B is unblocked, the intended flow is:
 
 1. `provision` → `qualify` the host.
 2. `plan` with the pinned digests and fixture.
-3. `run --suite judger` for the direct baseline; then `run --suite iris` for the
-   full path.
+3. `run --suite judger` for the direct baseline. `--suite iris` is **not
+   implemented** (the agent refuses any non-`judger` suite); it is not merely
+   gated.
 4. `collect`, then analyze; write an immutable run bundle.
 
 Until then, Track B produces qualification evidence and a resolved plan, not an
@@ -393,3 +403,6 @@ As of this review, the following are honest limits:
   build; neither ships as a committed binary.
 - **Measurement remains gated.** Gate 0 (Judger containment) and the
   unimplemented full-Iris/AMQP suite block an accepted end-to-end measurement.
+- **The delivered directory may carry a git worktree pointer.** If `.git` is a
+  file pointing at an external git store, `git` is not usable standalone; a real
+  handoff should be a normal clone or a plain archive of the tree.
