@@ -103,16 +103,15 @@ Common:
   committed to the repository).
 - Docker with `buildx` **only** if you use `--resolve-image` or build
   `images/judger-bench.Dockerfile`; otherwise supply digests explicitly.
-- An SSH alias/host-key entry for the benchmark host and a working
-  **non-interactive** path to it. The controller sets `BatchMode=yes` and builds
-  its own control socket: `paths.socketDir` (default `~/.ssh/sockets`) plus
-  socket name `iris-bench-<host>` (no `.sock`). Ansible instead uses
-  `ControlPath=~/.ssh/sockets/%h.sock`; for an inventory host named `codedang8`
-  that resolves to exactly `~/.ssh/sockets/codedang8.sock`. So Ansible *does*
-  reuse an existing `codedang8.sock`, but the controller does not. Verify before
-  anything else: `ssh -o BatchMode=yes -o ConnectTimeout=15 codedang8 true`.
-- Optional: `cp .env.example .env` to load the documented non-secret names,
-  endpoints, and ARNs locally. `.env` is git-ignored.
+- **SSH access to the benchmark host is provided by the operator's
+  environment.** The operator is expected to have a working, non-interactive
+  SSH path to the target (an `~/.ssh/config` entry with any `ProxyJump`, plus a
+  control socket). Confirm it works before anything else. The controller and
+  Ansible each use a configurable control socket; align them with the operator's
+  existing socket or provide key/agent authentication. The socket location is
+  environment-specific and is not fixed by this repository.
+- Optional: `cp .env.example .env`. `.env` feeds the AWS shell scripts (not the
+  controller) and is git-ignored.
 - For qualification/provisioning: `sudo`/become access on the host. Server hosts
   in this environment have **no passwordless sudo**, so `--ask-become-pass` and
   an interactive terminal are required.
@@ -354,7 +353,7 @@ reason. Never write credentials or full connection strings into a bundle.
    cgroup and has no delegated-parent option. The direct suite refuses to accept
    a sample outside the intended subtree, so it cannot currently produce an
    accepted measurement. Resolution is a reviewed Judger patch/upgrade, a
-   private-cgroup mount, or a KVM fallback (see `README.md` and the private plan).
+   private-cgroup mount, or a KVM fallback (see `README.md`).
 2. **server8 detached.** Track A cannot run against it until a benchmark node is
    returned to a cluster; Track B targets it standalone.
 3. **Full-Iris suite unimplemented.** The A/C ladder cannot be driven through the
@@ -399,10 +398,10 @@ As of this review, the following are honest limits:
 - **The Iris digest is a cache, not a resolution.** Without Docker/buildx you
   cannot re-resolve `ghcr.io/skkuding/codedang-iris:stage` from the repo alone.
 - **The agent and Judger are external.** The controller does not stage
-  `iris-bench-agent`, and the alpha.4 Judger binary is dowloaded by the image
+  `iris-bench-agent`, and the alpha.4 Judger binary is downloaded by the image
   build; neither ships as a committed binary.
 - **Measurement remains gated.** Gate 0 (Judger containment) and the
   unimplemented full-Iris/AMQP suite block an accepted end-to-end measurement.
-- **The delivered directory may carry a git worktree pointer.** If `.git` is a
-  file pointing at an external git store, `git` is not usable standalone; a real
-  handoff should be a normal clone or a plain archive of the tree.
+- **Hand off a clean tree.** Use a normal clone or an archive that excludes
+  untracked, secret-bearing files such as `terraform.tfvars`, `*.tfstate*`,
+  `.env`, and `.terraform/`. Do not package a live working directory as-is.

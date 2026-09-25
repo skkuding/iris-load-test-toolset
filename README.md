@@ -116,6 +116,9 @@ iris-benchctl status  --config FILE --run RUNID [--host ALIAS]
 -fixture name=path      checksummed fixture input (repeatable)
 ```
 
+`run` additionally accepts the direct-suite flags listed in the `run` section
+below (`--cgroup-parent`, `--bench-binary`, `--judger`, and others).
+
 ### plan
 
 ```bash
