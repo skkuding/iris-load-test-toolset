@@ -279,12 +279,15 @@ implementation. For each host it builds:
   directory is created with mode `0700`, and the resulting control path must be
   shorter than 104 bytes.
 - The controller sets `BatchMode=yes`, so authentication must already work
-  non-interactively (agent/key or an existing control socket). Reusing the
-  operator's existing sockets, aliases, `ProxyJump`, and host-key policy is the
-  intended model.
-- Ansible uses `-o ControlPath=~/.ssh/sockets/%h.sock` with `ControlPersist=3600`
-  (`ansible/ansible.cfg`), so qualification and provisioning reuse the same
-  sockets.
+  non-interactively (key/agent, or a control socket at the exact path the tool
+  builds). The controller builds `ControlPath=<socketDir>/iris-bench-<sanitized-host>`
+  and does not read a socket path from the environment. Ansible uses
+  `ControlPath=~/.ssh/sockets/%h.sock` (`ansible/ansible.cfg`), where `%h`
+  expands to the host's canonical name, not necessarily the inventory alias.
+- Consequence: an operator's existing socket is reused only if its path matches
+  what a tool builds. Use key/agent auth, or create the socket at the expected
+  path (for example a symlink). The operator's aliases, `ProxyJump`, and
+  host-key policy still apply.
 
 The transport only places validated remote tokens on the command line; plan
 JSON and other untrusted data travel over stdin. Remote paths must be absolute
@@ -394,11 +397,11 @@ terraform -chdir=infra/aws/iris-benchmark plan
 source .env   # optional shell env; contains names/ARNs only, no secret values
 scripts/aws/bootstrap-benchmark-db-role.sh --yes
 
-# 5. Export sanitized fixtures from the clone, then pin and upload them.
-scripts/aws/export-problem-fixtures.sh --out fixtures
-scripts/aws/export-problem-fixtures.sh --validate --fixtures-dir fixtures
-scripts/aws/build-fixture-manifest.sh --write
+# 5. Verify the committed fixtures, then upload them to the dedicated bucket.
+#    (To regenerate from the clone instead, see "Export, manifest, upload" and
+#    export to a staging directory such as /tmp/benchmark-fixtures.)
 fixtures/tests/verify-fixtures.sh
+scripts/aws/build-fixture-manifest.sh --check
 scripts/aws/upload-fixtures.sh --dry-run
 scripts/aws/upload-fixtures.sh --yes
 ```
