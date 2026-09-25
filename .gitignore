@@ -1,0 +1,7 @@
+.env
+*.tfplan
+*.tfstate
+*.tfstate.*
+terraform.tfvars
+runs/
+bin/

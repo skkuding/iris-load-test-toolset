@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "toolVersion": "0.1.0",
+  "iris": {
+    "image": "ghcr.io/skkuding/codedang-iris:stage"
+  },
+  "profiles": {
+    "isolated-1s": {
+      "suite": "judger",
+      "workers": 1,
+      "repetitions": 5,
+      "cpuList": "2-3",
+      "numaPolicy": "bind"
+    }
+  },
+  "hosts": [
+    {
+      "alias": "codedang8",
+      "hostIdentity": "server8",
+      "allow": true
+    }
+  ],
+  "paths": {
+    "socketDir": "~/.ssh/sockets",
+    "resultRoot": "runs"
+  },
+  "limits": {
+    "maxWorkers": 16,
+    "maxRunSeconds": 3600
+  }
+}

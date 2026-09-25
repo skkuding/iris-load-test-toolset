@@ -1,0 +1,220 @@
+package main
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"flag"
+	"fmt"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/skkuding/iris-load-test-toolset/internal/artifact"
+	"github.com/skkuding/iris-load-test-toolset/internal/config"
+	"github.com/skkuding/iris-load-test-toolset/internal/runplan"
+	"github.com/skkuding/iris-load-test-toolset/internal/transport"
+)
+
+// stringList is a repeatable string flag.
+type stringList []string
+
+func (s *stringList) String() string { return strings.Join(*s, ",") }
+
+func (s *stringList) Set(v string) error {
+	*s = append(*s, v)
+	return nil
+}
+
+// planOptions are the flags shared by plan and run.
+type planOptions struct {
+	configPath       string
+	host             string
+	profile          string
+	suite            string
+	runID            string
+	irisDigest       string
+	judgerDigest     string
+	judgerDigestFile string
+	resolveImage     bool
+	seed             int64
+	fixtures         stringList
+}
+
+func (o *planOptions) register(fs *flag.FlagSet) {
+	fs.StringVar(&o.configPath, "config", "", "configuration JSON file")
+	fs.StringVar(&o.host, "host", "", "target SSH alias from the allowlist")
+	fs.StringVar(&o.profile, "profile", "", "profile name from configuration")
+	fs.StringVar(&o.suite, "suite", "", "override suite (judger or iris)")
+	fs.StringVar(&o.runID, "run-id", "", "explicit run id (default generated)")
+	fs.StringVar(&o.irisDigest, "iris-digest", "", "resolved Iris manifest digest (sha256:...)")
+	fs.StringVar(&o.judgerDigest, "judger-digest", "", "Judger artifact SHA-256 (raw hex or sha256:...)")
+	fs.StringVar(&o.judgerDigestFile, "judger-digest-file", "", "file whose SHA-256 is the Judger digest")
+	fs.BoolVar(&o.resolveImage, "resolve-image", false, "resolve the Iris tag with docker buildx imagetools")
+	fs.Int64Var(&o.seed, "seed", 1, "run random seed")
+	fs.Var(&o.fixtures, "fixture", "fixture name=path (repeatable)")
+}
+
+func loadConfig(path string) (config.Config, error) {
+	if path == "" {
+		return config.Config{}, errors.New("--config is required")
+	}
+	return config.Load(path)
+}
+
+// buildPlan resolves a run plan and its SHA-256. It requires a resolved image
+// digest and a Judger digest; tag-only plans are blocked here by design.
+func (o *planOptions) buildPlan(ctx context.Context, cfg config.Config) (runplan.Plan, string, error) {
+	if o.host == "" {
+		return runplan.Plan{}, "", errors.New("--host is required")
+	}
+	host, ok := cfg.AllowedHost(o.host)
+	if !ok {
+		return runplan.Plan{}, "", fmt.Errorf("host %q is not allowlisted", o.host)
+	}
+	if o.profile == "" {
+		return runplan.Plan{}, "", errors.New("--profile is required")
+	}
+	prof, ok := cfg.Profiles[o.profile]
+	if !ok {
+		return runplan.Plan{}, "", fmt.Errorf("unknown profile %q", o.profile)
+	}
+	suite := prof.Suite
+	if o.suite != "" {
+		suite = o.suite
+	}
+	switch suite {
+	case "judger", "iris":
+	default:
+		return runplan.Plan{}, "", fmt.Errorf("invalid suite %q", suite)
+	}
+	runID := o.runID
+	if runID == "" {
+		id, err := runplan.GenerateRunID(time.Now(), rand.Reader)
+		if err != nil {
+			return runplan.Plan{}, "", err
+		}
+		runID = id
+	}
+	fixtures, err := o.resolveFixtures()
+	if err != nil {
+		return runplan.Plan{}, "", err
+	}
+	irisDigest := o.irisDigest
+	if irisDigest == "" && o.resolveImage {
+		resolver := runplan.DockerResolver{Runner: transport.OSExecer{}}
+		irisDigest, err = resolver.Resolve(ctx, cfg.Iris.Image)
+		if err != nil {
+			return runplan.Plan{}, "", err
+		}
+	}
+	judger, err := o.resolveJudger()
+	if err != nil {
+		return runplan.Plan{}, "", err
+	}
+	images := map[string]runplan.Image{
+		"iris": {Reference: cfg.Iris.Image, Digest: irisDigest},
+	}
+	if cfg.Iris.RabbitMQImage != "" {
+		images["rabbitmq"] = runplan.Image{Reference: cfg.Iris.RabbitMQImage}
+	}
+	blockID := o.profile + "-01"
+	plan, err := runplan.Build(runplan.BuildInput{
+		ToolVersion:  toolVersion,
+		RunID:        runID,
+		Seed:         o.seed,
+		Target:       runplan.Target{SSHAlias: host.Alias, HostIdentity: host.HostIdentity},
+		Suite:        suite,
+		Profile:      o.profile,
+		Fixtures:     fixtures,
+		Images:       images,
+		JudgerDigest: judger,
+		Blocks: []runplan.Block{{
+			ID:          blockID,
+			Suite:       suite,
+			Profile:     o.profile,
+			Workers:     prof.Workers,
+			CPUList:     prof.CPUList,
+			NUMAPolicy:  prof.NUMAPolicy,
+			Repetitions: prof.Repetitions,
+		}},
+		Qualification: runplan.Qualification{RequireCgroupV2: true, MinPhysicalCores: 1, MaxRunSeconds: cfg.Limits.MaxRunSeconds},
+		Cleanup:       runplan.Cleanup{RemoveContainers: true, RemoveRunDir: true, PreserveEvidence: true},
+	})
+	if err != nil {
+		return runplan.Plan{}, "", err
+	}
+	if err := plan.ValidateRunnable(); err != nil {
+		return runplan.Plan{}, "", err
+	}
+	sha, err := plan.Digest()
+	if err != nil {
+		return runplan.Plan{}, "", err
+	}
+	return plan, sha, nil
+}
+
+func (o *planOptions) resolveFixtures() ([]runplan.Fixture, error) {
+	var out []runplan.Fixture
+	for _, spec := range o.fixtures {
+		name, path, ok := strings.Cut(spec, "=")
+		if !ok || name == "" || path == "" {
+			return nil, fmt.Errorf("invalid --fixture %q (want name=path)", spec)
+		}
+		sum, _, err := artifact.HashFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("fixture %q: %w", name, err)
+		}
+		out = append(out, runplan.Fixture{Name: name, Path: path, SHA256: sum})
+	}
+	return out, nil
+}
+
+func (o *planOptions) resolveJudger() (string, error) {
+	if o.judgerDigestFile != "" {
+		sum, _, err := artifact.HashFile(o.judgerDigestFile)
+		if err != nil {
+			return "", fmt.Errorf("judger file: %w", err)
+		}
+		return "sha256:" + sum, nil
+	}
+	if o.judgerDigest == "" {
+		return "", errors.New("judger digest is required (--judger-digest or --judger-digest-file)")
+	}
+	d := o.judgerDigest
+	if !strings.HasPrefix(d, "sha256:") {
+		d = "sha256:" + d
+	}
+	if !runplan.ValidImageDigest(d) {
+		return "", fmt.Errorf("invalid judger digest %q", o.judgerDigest)
+	}
+	return d, nil
+}
+
+func newOpID() (string, error) {
+	buf := make([]byte, 10)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return "op-" + hex.EncodeToString(buf), nil
+}
+
+// agentPath builds the versioned remote agent path.
+func agentPath(cfg config.Config, override string) string {
+	if override != "" {
+		return override
+	}
+	return filepath.Join(cfg.Paths.BinRoot, toolVersion, "iris-bench-agent")
+}
+
+func makeSSH(cfg config.Config, host string) transport.SSH {
+	return transport.SSH{
+		Host: host,
+		Opts: transport.Options{
+			SocketDir:      cfg.Paths.SocketDir,
+			BatchMode:      true,
+			ConnectTimeout: transport.DefaultConnectTimeout,
+		},
+	}
+}
