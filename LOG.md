@@ -35,7 +35,8 @@ host qualification/provisioning foundation.
   resources.
 - Production RDS, S3, Kubernetes, and production nodes remain read-only.
 - Secrets and connection strings must not be committed or written to result
-  bundles. `.env.example` contains names and placeholders only.
+  bundles. `.env.example` contains only non-secret names, endpoints, ARNs, and
+  reviewed digests.
 - Benchmark fixture content committed to this repository must be sanitized and
   license-compatible.
 
@@ -71,35 +72,36 @@ host qualification/provisioning foundation.
 - 2026-09-25: Applied the first Terraform slice. The encrypted manual snapshot
   is `available`, and state contains the KMS key, private S3 bucket, public
   access block, read/upload IAM roles, read-only secret, parameter group, subnet
-  group, and random read-only password. The benchmark RDS instance has not yet
-  been created.
+  group, and random read-only password.
 - 2026-09-25: Added `CONTRIBUTING.md` and the pull request template from the
   CodeDANG repository and split work into Angular-convention commits.
+- 2026-09-25: Cleared the three operator-approved false taints caused by denied
+  post-create reads. Every follow-up plan was required to contain zero destroys
+  before apply.
+- 2026-09-25: Completed the encrypted RDS clone
+  `codedang-iris-benchmark`. It is available, deletion-protected, restricted to
+  server8's `/32`, and uses the benchmark KMS key for storage, Performance
+  Insights, and its active RDS-managed master secret. The inherited production
+  password was replaced without reading or reusing it.
+- 2026-09-25: Bootstrapped and verified database role `benchmark_ro` through an
+  SSH tunnel to server8. Its sessions force read-only transactions and it can
+  select `public.problem_testcase` in database `skkuding`.
+- 2026-09-25: Exported problem specifications and active testcase metadata from
+  the clone. Kept one repository-safe fixture per problem: `568/15850` is a
+  small spec-derived case because the DB row had empty inline data; `569/15852`
+  and `570/15873` are public sample rows. Hidden production cases were excluded.
+- 2026-09-25: Uploaded and checksum-verified the six fixture objects in the
+  versioned, SSE-KMS bucket `codedang-iris-benchmark-testcases`. A read-only role
+  independently listed the 568 prefix and verified `hidden=false` tagging.
 
 ## Current Work
 
-- Pause AWS mutation pending operator direction on two Terraform taint markers.
-- After approval, clear only the false taints on
-  `aws_db_parameter_group.benchmark` and `aws_db_subnet_group.benchmark`, then
-  re-plan. The plan must contain no production changes and no replacement of
-  those healthy resources before apply continues.
-- Complete the benchmark RDS restore, bootstrap and verify the read-only DB
-  role, inspect problems 568/569/570 in the clone, replace placeholder fixtures
-  with clone-derived sanitized files using database testcase IDs, regenerate
-  the manifest, and upload identical objects with hidden tags.
-- Run a final no-change Terraform plan and complete repository validation.
+- Finish operator documentation and repository-wide validation.
+- Run read-only qualification on server8 before any provisioning decision.
+- Resolve the Judger containment blocker before accepting measurements.
 
 ## Blockers
 
-- The first Terraform apply created the parameter and subnet groups but failed
-  their post-create reads before the deployer policy included
-  `rds:ListTagsForResource`. Terraform marked both resources tainted. The policy
-  is fixed and reads now succeed, but `terraform untaint` is a state mutation
-  and has not been authorized. No replacement or further apply will run until
-  the operator chooses how to proceed.
-- Committed fixture files are intentionally synthetic placeholders and must not
-  be uploaded as parity fixtures. Clone-derived export is blocked until the RDS
-  restore and read-only role bootstrap complete.
 - Stock Judger alpha.4 does not accept an explicit delegated cgroup parent. The
   runner now fails closed when its reported path is outside the per-worker
   subtree; a corrected Judger build or private cgroup mount arrangement must be
