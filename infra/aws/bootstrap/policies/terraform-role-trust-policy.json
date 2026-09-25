@@ -1,0 +1,13 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowBenchmarkDeployerUserToAssume",
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::__ACCOUNT_ID__:user/__DEPLOYER_USER__"
+      },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}

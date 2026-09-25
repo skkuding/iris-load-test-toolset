@@ -1,0 +1,339 @@
+#!/usr/bin/env bash
+#
+# Minimal, stateful fake AWS CLI for the bootstrap-deployer tests. It never
+# contacts AWS and never requires credentials.
+#
+# Environment:
+#   FAKE_AWS_LOG            required: path appended with one line per invocation
+#   FAKE_AWS_STATE_DIR      required: directory holding simulated IAM/STS state
+#   FAKE_AWS_ACCOUNT        account id (default 219857217698)
+#   FAKE_ACCESS_KEY_ID      access key id returned by iam create-access-key
+#   FAKE_ACCESS_KEY_SECRET  secret returned by iam create-access-key
+#   FAKE_AWS_SIMULATE_DECISION  EvalDecision (default allowed)
+#   AWS_SHARED_CREDENTIALS_FILE / AWS_CONFIG_FILE  honored by configure import/set
+#
+# Unexpected subcommands exit 42 so tests catch undocumented calls.
+set -euo pipefail
+
+[ -n "${FAKE_AWS_LOG:-}" ] || {
+  echo "fake-aws: FAKE_AWS_LOG not set" >&2
+  exit 2
+}
+printf '%s\n' "$*" >>"${FAKE_AWS_LOG}"
+
+state="${FAKE_AWS_STATE_DIR:?fake-aws: FAKE_AWS_STATE_DIR not set}"
+mkdir -p "${state}"
+acct="${FAKE_AWS_ACCOUNT:-219857217698}"
+
+svc="${1:-}"
+op="${2:-}"
+shift 2 || true
+cmd="${svc} ${op}"
+
+flag() {
+  local want="$1"
+  shift
+  while [ $# -gt 0 ]; do
+    if [ "$1" = "$want" ]; then
+      printf '%s' "${2:-}"
+      return 0
+    fi
+    shift
+  done
+  return 0
+}
+
+doc_from() {
+  local ref
+  ref="$(flag --policy-document "$@" || true)"
+  if [ -z "${ref}" ]; then
+    ref="$(flag --assume-role-policy-document "$@" || true)"
+  fi
+  if [ -n "${ref}" ]; then
+    cat "${ref#file://}"
+  else
+    printf '{}'
+  fi
+}
+
+parse_tags() {
+  local -a toks=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tags)
+        shift
+        while [ $# -gt 0 ] && [ "${1#--}" = "$1" ]; do
+          toks+=("$1")
+          shift
+        done
+        ;;
+      *) shift ;;
+    esac
+  done
+  if [ ${#toks[@]} -eq 0 ]; then
+    printf '[]'
+    return
+  fi
+  printf '%s\n' "${toks[@]}" |
+    jq -R -s '
+      split("\n")
+      | map(select(length > 0))
+      | map(split(",") | {(.[0] | sub("^Key="; "")): (.[1] | sub("^Value="; ""))})
+      | add // {}
+      | [to_entries[] | {Key: .key, Value: (.value | tostring)}]
+    '
+}
+
+# --- STS ---------------------------------------------------------------------
+
+case "${cmd}" in
+  "sts get-caller-identity")
+    jq -n --arg acct "${acct}" \
+      '{UserId:"AIDABOOTSTRAP",Account:$acct,Arn:("arn:aws:iam::"+$acct+":user/bootstrap-admin")}'
+    exit 0
+    ;;
+  "sts assume-role")
+    role_name="$(flag --role-arn "$@" || true)"
+    role_name="${role_name#arn:aws:iam::*:role/}"
+    session="$(flag --role-session-name "$@" || true)"
+    jq -n --arg acct "${acct}" --arg role "${role_name}" --arg session "${session}" \
+      '{AssumedRoleUser:{AssumedRoleArn:("arn:aws:iam::"+$acct+":role/"+$role),Arn:("arn:aws:sts::"+$acct+":assumed-role/"+$role+"/"+$session)},Credentials:{AccessKeyId:"ASIAFAKE",SecretAccessKey:"FakeAssumed",SessionToken:"FakeToken",Expiration:"2030-01-01T00:00:00Z"}}'
+    exit 0
+    ;;
+esac
+
+# --- IAM ---------------------------------------------------------------------
+
+if [ "${svc}" = "iam" ]; then
+  case "${cmd}" in
+    "iam get-user")
+    if [ -f "${state}/user.json" ]; then
+      jq -n --slurpfile u "${state}/user.json" '{User: $u[0]}'
+    else
+      echo "fake-aws: no such user" >&2
+      exit 254
+    fi
+    ;;
+  "iam create-user")
+    name="$(flag --user-name "$@" || true)"
+    jq -n --arg n "${name}" --arg acct "${acct}" \
+      '{UserName:$n,Arn:("arn:aws:iam::"+$acct+":user/"+$n),Tags:[]}' >"${state}/user.json"
+    jq -n --slurpfile u "${state}/user.json" '{User: $u[0]}'
+    ;;
+  "iam tag-user")
+    [ -f "${state}/user.json" ] || echo '{"UserName":""}' >"${state}/user.json"
+    jq --argjson t "$(parse_tags "$@")" '.Tags = $t' "${state}/user.json" >"${state}/user.json.tmp"
+    mv "${state}/user.json.tmp" "${state}/user.json"
+    echo '{}'
+    ;;
+  "iam put-user-policy")
+    name="$(flag --policy-name "$@" || true)"
+    doc="$(doc_from "$@")"
+    [ -f "${state}/inline-user.json" ] && base="$(cat "${state}/inline-user.json")" || base='{}'
+    jq --arg n "${name}" --argjson d "${doc}" '. + {($n): $d}' <<<"${base}" >"${state}/inline-user.json"
+    echo '{}'
+    ;;
+  "iam list-user-policies")
+    if [ -f "${state}/inline-user.json" ]; then
+      jq -n --slurpfile m "${state}/inline-user.json" '{PolicyNames: ($m[0] | keys)}'
+    else
+      echo '{"PolicyNames":[]}'
+    fi
+    ;;
+  "iam delete-user-policy")
+    name="$(flag --policy-name "$@" || true)"
+    [ -f "${state}/inline-user.json" ] || : >"${state}/inline-user.json"
+    jq --arg n "${name}" 'del(.[$n])' "${state}/inline-user.json" >"${state}/inline-user.json.tmp"
+    mv "${state}/inline-user.json.tmp" "${state}/inline-user.json"
+    echo '{}'
+    ;;
+  "iam list-attached-user-policies")
+    if [ -f "${state}/attached-user.json" ]; then
+      jq -n --slurpfile a "${state}/attached-user.json" \
+        '{AttachedPolicies: [$a[0][] | {PolicyArn: .}]}'
+    else
+      echo '{"AttachedPolicies":[]}'
+    fi
+    ;;
+  "iam detach-user-policy")
+    arn="$(flag --policy-arn "$@" || true)"
+    [ -f "${state}/attached-user.json" ] || echo '[]' >"${state}/attached-user.json"
+    jq --arg a "${arn}" 'map(select(. != $a))' "${state}/attached-user.json" >"${state}/attached-user.json.tmp"
+    mv "${state}/attached-user.json.tmp" "${state}/attached-user.json"
+    echo '{}'
+    ;;
+  "iam get-role")
+    if [ -f "${state}/role.json" ]; then
+      jq -n --slurpfile r "${state}/role.json" '{Role: $r[0]}'
+    else
+      echo "fake-aws: no such role" >&2
+      exit 254
+    fi
+    ;;
+  "iam create-role")
+    name="$(flag --role-name "$@" || true)"
+    doc="$(doc_from "$@")"
+    jq -n --arg n "${name}" --arg acct "${acct}" --argjson doc "${doc}" \
+      '{RoleName:$n,Arn:("arn:aws:iam::"+$acct+":role/"+$n),AssumeRolePolicyDocument:$doc,Tags:[]}' \
+      >"${state}/role.json"
+    jq -n --slurpfile r "${state}/role.json" '{Role: $r[0]}'
+    ;;
+  "iam update-assume-role-policy")
+    doc="$(doc_from "$@")"
+    jq --argjson doc "${doc}" '.AssumeRolePolicyDocument = $doc' "${state}/role.json" >"${state}/role.json.tmp"
+    mv "${state}/role.json.tmp" "${state}/role.json"
+    echo '{}'
+    ;;
+  "iam tag-role")
+    echo '{}'
+    ;;
+  "iam list-attached-role-policies")
+    if [ -f "${state}/attached-role.json" ]; then
+      jq -n --slurpfile a "${state}/attached-role.json" \
+        '{AttachedPolicies: [$a[0][] | {PolicyArn: .}]}'
+    else
+      echo '{"AttachedPolicies":[]}'
+    fi
+    ;;
+  "iam attach-role-policy")
+    arn="$(flag --policy-arn "$@" || true)"
+    [ -f "${state}/attached-role.json" ] || echo '[]' >"${state}/attached-role.json"
+    jq --arg a "${arn}" '. + [$a] | unique' "${state}/attached-role.json" >"${state}/attached-role.json.tmp"
+    mv "${state}/attached-role.json.tmp" "${state}/attached-role.json"
+    echo '{}'
+    ;;
+  "iam detach-role-policy")
+    arn="$(flag --policy-arn "$@" || true)"
+    [ -f "${state}/attached-role.json" ] || echo '[]' >"${state}/attached-role.json"
+    jq --arg a "${arn}" 'map(select(. != $a))' "${state}/attached-role.json" >"${state}/attached-role.json.tmp"
+    mv "${state}/attached-role.json.tmp" "${state}/attached-role.json"
+    echo '{}'
+    ;;
+  "iam list-role-policies")
+    if [ -f "${state}/inline-role.json" ]; then
+      jq -n --slurpfile m "${state}/inline-role.json" '{PolicyNames: ($m[0] | keys)}'
+    else
+      echo '{"PolicyNames":[]}'
+    fi
+    ;;
+  "iam delete-role-policy")
+    name="$(flag --policy-name "$@" || true)"
+    [ -f "${state}/inline-role.json" ] || echo '{}' >"${state}/inline-role.json"
+    jq --arg n "${name}" 'del(.[$n])' "${state}/inline-role.json" >"${state}/inline-role.json.tmp"
+    mv "${state}/inline-role.json.tmp" "${state}/inline-role.json"
+    echo '{}'
+    ;;
+  "iam get-policy")
+    if [ -f "${state}/policy.json" ]; then
+      jq -n --slurpfile p "${state}/policy.json" \
+        '{Policy: {Arn: $p[0].Arn, PolicyName: $p[0].PolicyName, DefaultVersionId: $p[0].DefaultVersionId}}'
+    else
+      echo "fake-aws: no such policy" >&2
+      exit 254
+    fi
+    ;;
+  "iam create-policy")
+    name="$(flag --policy-name "$@" || true)"
+    doc="$(doc_from "$@")"
+    tags="$(parse_tags "$@")"
+    jq -n --arg n "${name}" --arg acct "${acct}" --argjson doc "${doc}" --argjson tags "${tags}" \
+      '{Arn:("arn:aws:iam::"+$acct+":policy/"+$n),PolicyName:$n,DefaultVersionId:"v1",Document:$doc,Tags:$tags,VersionCount:1}' \
+      >"${state}/policy.json"
+    jq -n --slurpfile p "${state}/policy.json" \
+      '{Policy: {Arn: $p[0].Arn, PolicyName: $p[0].PolicyName, DefaultVersionId: $p[0].DefaultVersionId}}'
+    ;;
+  "iam list-policy-tags")
+    if [ -f "${state}/policy.json" ]; then
+      jq -n --slurpfile p "${state}/policy.json" '{Tags: ($p[0].Tags // [])}'
+    else
+      echo '{"Tags":[]}'
+    fi
+    ;;
+  "iam tag-policy")
+    tags="$(parse_tags "$@")"
+    jq --argjson t "${tags}" '.Tags = $t' "${state}/policy.json" >"${state}/policy.json.tmp"
+    mv "${state}/policy.json.tmp" "${state}/policy.json"
+    echo '{}'
+    ;;
+  "iam create-policy-version")
+    doc="$(doc_from "$@")"
+    jq --argjson doc "${doc}" '.Document = $doc | .VersionCount += 1 | .DefaultVersionId = ("v" + (.VersionCount | tostring))' \
+      "${state}/policy.json" >"${state}/policy.json.tmp"
+    mv "${state}/policy.json.tmp" "${state}/policy.json"
+    jq -n --slurpfile p "${state}/policy.json" '{PolicyVersion: {VersionId: $p[0].DefaultVersionId}}'
+    ;;
+  "iam list-access-keys")
+    if [ -f "${state}/keys.json" ]; then
+      jq -n --slurpfile k "${state}/keys.json" \
+        '{AccessKeyMetadata: [$k[0][] | {AccessKeyId: .AccessKeyId, Status: .Status}]}'
+    else
+      echo '{"AccessKeyMetadata":[]}'
+    fi
+    ;;
+  "iam create-access-key")
+    name="$(flag --user-name "$@" || true)"
+    [ -f "${state}/keys.json" ] && base="$(cat "${state}/keys.json")" || base='[]'
+    count="$(jq 'length' <<<"${base}")"
+    akid="${FAKE_ACCESS_KEY_ID:-$(printf 'AKIAFAKEKEYID%05d' "$((count + 1))")}"
+    secret="${FAKE_ACCESS_KEY_SECRET:-FakeSecretValue/ABC123}"
+    jq --arg n "${name}" --arg id "${akid}" --arg s "${secret}" \
+      '. + [{UserName: $n, AccessKeyId: $id, Status: "Active", SecretAccessKey: $s}]' \
+      <<<"${base}" >"${state}/keys.json"
+    jq -n --arg n "${name}" --arg id "${akid}" --arg s "${secret}" \
+      '{AccessKey: {UserName: $n, AccessKeyId: $id, Status: "Active", SecretAccessKey: $s}}'
+    ;;
+  "iam update-access-key")
+    id="$(flag --access-key-id "$@" || true)"
+    status="$(flag --status "$@" || true)"
+    jq --arg id "${id}" --arg s "${status}" \
+      'map(if .AccessKeyId == $id then .Status = $s else . end)' "${state}/keys.json" >"${state}/keys.json.tmp"
+    mv "${state}/keys.json.tmp" "${state}/keys.json"
+    echo '{}'
+    ;;
+  "iam delete-access-key")
+    id="$(flag --access-key-id "$@" || true)"
+    jq --arg id "${id}" 'map(select(.AccessKeyId != $id))' "${state}/keys.json" >"${state}/keys.json.tmp"
+    mv "${state}/keys.json.tmp" "${state}/keys.json"
+    echo '{}'
+    ;;
+  "iam simulate-principal-policy")
+    jq -n --arg d "${FAKE_AWS_SIMULATE_DECISION:-allowed}" \
+      '{EvaluationResults: [{EvalDecision: $d}]}'
+    ;;
+  *)
+    echo "fake-aws: unexpected invocation: ${cmd} $*" >&2
+    exit 42
+    ;;
+  esac
+  exit 0
+fi
+
+# --- configure ---------------------------------------------------------------
+
+if [ "${svc}" = "configure" ]; then
+  case "${cmd}" in
+  "configure import")
+    csv="$(flag --csv "$@" || true)"
+    csv="${csv#file://}"
+    cred="${AWS_SHARED_CREDENTIALS_FILE:-${HOME}/.aws/credentials}"
+    mkdir -p "$(dirname "${cred}")"
+    line="$(tail -n +2 "${csv}" | head -1)"
+    IFS=',' read -r pname akid secret <<<"${line}"
+    {
+      printf '[%s]\n' "${pname}"
+      printf 'aws_access_key_id = %s\n' "${akid}"
+      printf 'aws_secret_access_key = %s\n' "${secret}"
+    } >>"${cred}"
+    chmod 600 "${cred}"
+    echo "Successfully imported 1 profile(s)"
+    ;;
+  "configure set")
+    # aws configure set <var> <value> [--profile P]; only region/output used.
+    echo ''
+    ;;
+  esac
+  exit 0
+fi
+
+echo "fake-aws: unexpected invocation: ${cmd} $*" >&2
+exit 42
