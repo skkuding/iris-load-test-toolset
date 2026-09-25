@@ -4,15 +4,15 @@ Last reviewed: 2026-09-25
 
 This is the operator manual for reproducing the original **Wave 1** Iris
 runtime-reproducibility experiment. It is written so that a new operator, on a
-different machine, can use this repository alone.
+different machine, can use this repository alone. The private benchmark plan and
+progress log are maintained separately and are **not** part of this repository.
 
-Everything you need is inside this repository:
+What is inside this repository:
 
-- `PROPOSE.md` — the benchmark plan (goal, method, phases, gates, success
-  criteria).
-- `LOG.md` — current progress, decisions, and known blockers.
+- `README.md` — toolset overview, commands, and AWS setup.
+- `docs/WAVE1-REPLICATION.md` — this manual.
 - `config/profiles.json`, `config/run.example.json` — controller configuration.
-- `fixtures/` — sanitized testcases and the pinned manifest.
+- `fixtures/` — sanitized testcases, metadata, and the pinned manifest.
 - `.env.example` — non-secret names, endpoints, ARNs, and the reviewed Iris
   digest.
 
@@ -127,7 +127,7 @@ Track A additionally:
 Track B additionally:
 
 - The dedicated benchmark RDS clone and S3 bucket exist and are reachable
-  (`LOG.md`; `.env.example`), and the read-only DB role is bootstrapped.
+  (`README.md`; `.env.example`), and the read-only DB role is bootstrapped.
   **Creating that infrastructure is documented in `README.md` and `infra/aws/`;
   this manual assumes it already exists in your account.** A different account
   or operator cannot create it from this manual alone.
@@ -281,7 +281,7 @@ accepted measurement.
 Report per testcase `cpuTime` and `realTime`: count, failures, median, MAD,
 stdev, CV, p90/p95/p99/max, and p99/median. Keep raw samples.
 
-Initial qualification targets (from `PROPOSE.md`, to be revised after first
+Initial qualification targets (targets, to be revised after first
 controlled data):
 
 - direct one-worker `cpuTime` CV ≤ 3%;
@@ -344,7 +344,7 @@ reason. Never write credentials or full connection strings into a bundle.
    cgroup and has no delegated-parent option. The direct suite refuses to accept
    a sample outside the intended subtree, so it cannot currently produce an
    accepted measurement. Resolution is a reviewed Judger patch/upgrade, a
-   private-cgroup mount, or a KVM fallback (see `PROPOSE.md`).
+   private-cgroup mount, or a KVM fallback (see `README.md` and the private plan).
 2. **server8 detached.** Track A cannot run against it until a benchmark node is
    returned to a cluster; Track B targets it standalone.
 3. **Full-Iris suite unimplemented.** The A/C ladder cannot be driven through the
@@ -359,7 +359,7 @@ reason. Never write credentials or full connection strings into a bundle.
 
 ## 10. Fresh-operator quickstart checklist
 
-- [ ] Read `PROPOSE.md`, `LOG.md`, and this manual.
+- [ ] Read `README.md` and this manual.
 - [ ] Decide and record Track A or Track B.
 - [ ] Confirm the target (host alias, cluster context, or detached host).
 - [ ] Build the tools and verify `go test ./...`.

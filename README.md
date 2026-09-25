@@ -1,8 +1,9 @@
 # Iris Runtime Load-Test Toolset
 
 Reproducible benchmark tooling for investigating and stabilizing the runtime
-reported by Iris and Judger. The design is described in `PROPOSE.md`; `LOG.md`
-records approved decisions and progress.
+reported by Iris and Judger. Start with `docs/WAVE1-REPLICATION.md` for the
+operator procedure. The private benchmark plan and progress log are maintained
+outside this repository.
 
 This repository currently implements the **direct Judger foundation**:
 

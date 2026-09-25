@@ -2,7 +2,7 @@
 # Move movable IRQs away from benchmark CPUs and verify effective affinity.
 #
 # Kernel isolation (isolcpus/nohz_full/rcu_nocbs) is intentionally NOT enabled.
-# This role starts with verified cpusets and IRQ affinity, per PROPOSE.md.
+# This role starts with verified cpusets and IRQ affinity, per the benchmark plan.
 
 - name: IRQ | assert housekeeping CPU set is non-empty
   ansible.builtin.assert:
