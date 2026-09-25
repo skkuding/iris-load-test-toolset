@@ -5,9 +5,6 @@
       "Sid": "ReadBenchmarkAndSourceSnapshots",
       "Effect": "Allow",
       "Action": [
-        "rds:DescribeDBSnapshots",
-        "rds:DescribeDBSnapshotAttributes",
-        "rds:DescribeDBSnapshotTenantDatabases",
         "rds:ListTagsForResource"
       ],
       "Resource": [
@@ -34,26 +31,19 @@
         "rds:CreateDBInstance",
         "rds:ModifyDBInstance",
         "rds:DeleteDBInstance",
-        "rds:DescribeDBInstances",
         "rds:RestoreDBInstanceFromDBSnapshot",
         "rds:CreateDBParameterGroup",
         "rds:ModifyDBParameterGroup",
         "rds:DeleteDBParameterGroup",
-        "rds:DescribeDBParameterGroups",
-        "rds:DescribeDBParameters",
         "rds:CreateDBSubnetGroup",
         "rds:ModifyDBSubnetGroup",
         "rds:DeleteDBSubnetGroup",
-        "rds:DescribeDBSubnetGroups",
         "rds:CreateDBSnapshot",
         "rds:DeleteDBSnapshot",
         "rds:ModifyDBSnapshot",
         "rds:ModifyDBSnapshotAttribute",
         "rds:AddTagsToResource",
         "rds:RemoveTagsFromResource",
-        "rds:DescribeDBEngineVersions",
-        "rds:DescribeOrderableDBInstanceOptions",
-        "rds:DescribeDBInstanceAutomatedBackups",
         "rds:ListTagsForResource",
         "rds:ResetDBParameterGroup"
       ],
@@ -63,6 +53,23 @@
         "arn:aws:rds:__REGION__:__ACCOUNT_ID__:subgrp:__NAME_PREFIX__*",
         "arn:aws:rds:__REGION__:__ACCOUNT_ID__:snapshot:__NAME_PREFIX__*"
       ]
+    },
+    {
+      "Sid": "DescribeRdsForTerraformRefresh",
+      "Effect": "Allow",
+      "Action": [
+        "rds:DescribeDBInstances",
+        "rds:DescribeDBSnapshots",
+        "rds:DescribeDBSnapshotAttributes",
+        "rds:DescribeDBSnapshotTenantDatabases",
+        "rds:DescribeDBParameterGroups",
+        "rds:DescribeDBParameters",
+        "rds:DescribeDBSubnetGroups",
+        "rds:DescribeDBEngineVersions",
+        "rds:DescribeOrderableDBInstanceOptions",
+        "rds:DescribeDBInstanceAutomatedBackups"
+      ],
+      "Resource": "*"
     },
     {
       "Sid": "CreateBenchmarkKmsKey",
