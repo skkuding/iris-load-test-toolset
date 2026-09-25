@@ -40,6 +40,7 @@
 #   --terraform-role NAME     IAM role to create (default:
 #                             ${name_prefix}-terraform).
 #   --local-profile NAME      Local AWS profile for the created access key
+#   --role-profile NAME       Local profile that assumes the Terraform role
 #                             (default: the deployer user name).
 #   --region REGION           AWS region (default: $IRIS_BENCHMARK_AWS_REGION or
 #                             ap-northeast-2).
@@ -89,6 +90,7 @@ name_prefix="${IRIS_BENCHMARK_NAME_PREFIX:-codedang-iris-benchmark}"
 deployer_user=""
 terraform_role=""
 local_profile=""
+role_profile=""
 state_bucket="${IRIS_BENCHMARK_STATE_BUCKET:-codedang-tf-state}"
 state_key="${IRIS_BENCHMARK_STATE_KEY:-terraform/iris-benchmark.tfstate}"
 vpc_state_key="${IRIS_BENCHMARK_VPC_STATE_KEY:-terraform/vpc.tfstate}"
@@ -121,6 +123,7 @@ while [ $# -gt 0 ]; do
     --deployer-user) deployer_user="$2"; shift 2 ;;
     --terraform-role) terraform_role="$2"; shift 2 ;;
     --local-profile) local_profile="$2"; shift 2 ;;
+    --role-profile) role_profile="$2"; shift 2 ;;
     --region) region="$2"; shift 2 ;;
     --name-prefix) name_prefix="$2"; shift 2 ;;
     --state-bucket) state_bucket="$2"; shift 2 ;;
@@ -144,6 +147,7 @@ done
 [ -n "${deployer_user}" ] || deployer_user="${name_prefix}-deployer"
 [ -n "${terraform_role}" ] || terraform_role="${name_prefix}-terraform"
 [ -n "${local_profile}" ] || local_profile="${deployer_user}"
+[ -n "${role_profile}" ] || role_profile="${terraform_role}"
 
 require_value "--region" "${region}"
 require_value "--name-prefix" "${name_prefix}"
@@ -219,6 +223,7 @@ if [ "${dry_run}" = "true" ]; then
   log "dry-run: deployer user  = ${deployer_user}"
   log "dry-run: terraform role = ${terraform_role}"
   log "dry-run: local profile  = ${local_profile}"
+  log "dry-run: role profile   = ${role_profile}"
   log "dry-run: state bucket   = ${state_bucket}"
   log "dry-run: state key      = ${state_key}"
   log "dry-run: vpc state key  = ${vpc_state_key}"
@@ -242,6 +247,10 @@ aws_admin() {
 
 aws_deployer() {
   aws "$@" --region "${region}" --profile "${local_profile}"
+}
+
+aws_role() {
+  aws "$@" --region "${region}" --profile "${role_profile}"
 }
 
 caller="$(aws_admin sts get-caller-identity)"
@@ -418,6 +427,14 @@ if [ "${create_access_key}" = "true" ]; then
   aws configure set region "${region}" --profile "${local_profile}" >/dev/null
   aws configure set output json --profile "${local_profile}" >/dev/null
 
+  # Terraform and all benchmark mutations use this role profile. The base user
+  # profile remains limited to sts:AssumeRole.
+  aws configure set role_arn "${role_arn}" --profile "${role_profile}" >/dev/null
+  aws configure set source_profile "${local_profile}" --profile "${role_profile}" >/dev/null
+  aws configure set role_session_name iris-benchmark-terraform --profile "${role_profile}" >/dev/null
+  aws configure set region "${region}" --profile "${role_profile}" >/dev/null
+  aws configure set output json --profile "${role_profile}" >/dev/null
+
   assumed_arn="$(aws_deployer sts assume-role \
     --role-arn "${role_arn}" \
     --role-session-name iris-benchmark-verify |
@@ -427,7 +444,7 @@ if [ "${create_access_key}" = "true" ]; then
     *) die "role assumption verification returned an unexpected identity: ${assumed_arn}" ;;
   esac
   key_created="true"
-  log "role assumption verified using local profile '${local_profile}'"
+  log "role assumption verified using role profile '${role_profile}'"
 else
   decision="$(aws_admin iam simulate-principal-policy \
     --policy-source-arn "${user_arn}" \
@@ -444,5 +461,5 @@ fi
 log "bootstrap complete"
 log "deployer user: ${deployer_user} (only sts:AssumeRole on ${terraform_role})"
 if [ "${key_created}" = "true" ]; then
-  log "local profile '${local_profile}' configured; no credential was printed or committed"
+  log "base profile '${local_profile}' and role profile '${role_profile}' configured; no credential was printed or committed"
 fi
