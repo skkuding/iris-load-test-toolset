@@ -1,0 +1,249 @@
+---
+# Compatibility envelope evaluation. Read-only; safe to run in qualification.
+# Fails closed on a host that does not meet the envelope.
+
+- name: Compatibility | require successful topology derivation
+  ansible.builtin.assert:
+    that:
+      - iris_bench_topology.ok | default(false) | bool
+      - iris_bench_topology.online_cpus | default([]) | length > 0
+    fail_msg: >-
+      Could not derive CPU topology from lscpu. Raw output:
+      {{ iris_bench_lscpu_raw.stdout | default('') | truncate(400) }}
+    quiet: true
+
+- name: Compatibility | check architecture
+  ansible.builtin.assert:
+    that:
+      - ansible_architecture in iris_bench_compatibility.architecture.machines
+    fail_msg: "Unsupported architecture {{ ansible_architecture }}."
+    quiet: true
+
+- name: Compatibility | check operating system
+  ansible.builtin.assert:
+    that:
+      - ansible_distribution | lower in iris_bench_compatibility.os.ids
+      - ansible_distribution_version in iris_bench_compatibility.os.versions
+    fail_msg: >-
+      Unsupported OS {{ ansible_distribution }} {{ ansible_distribution_version }}.
+    quiet: true
+
+- name: Compatibility | check kernel version
+  ansible.builtin.assert:
+    that:
+      - iris_bench_kernel_release is version(iris_bench_compatibility.os.kernel_min, '>=')
+      - iris_bench_kernel_release is version(iris_bench_compatibility.os.kernel_max, '<=')
+    fail_msg: >-
+      Kernel {{ ansible_kernel }} (release {{ iris_bench_kernel_release }})
+      outside supported range {{ iris_bench_compatibility.os.kernel_min }}..
+      {{ iris_bench_compatibility.os.kernel_max }}.
+    quiet: true
+
+- name: Compatibility | check required CPU flags
+  ansible.builtin.assert:
+    that:
+      - (iris_bench_compatibility.architecture.required_cpu_flags | difference(iris_bench_cpu_flags)) | length == 0
+    fail_msg: >-
+      Missing required CPU flags:
+      {{ iris_bench_compatibility.architecture.required_cpu_flags | difference(iris_bench_cpu_flags) | join(', ') }}.
+    quiet: true
+
+- name: Compatibility | check physical core and NUMA minimums
+  ansible.builtin.assert:
+    that:
+      - iris_bench_topology.physical_cores | int >= iris_bench_compatibility.hardware.min_physical_cores
+      - iris_bench_topology.logical_cpus | int >= iris_bench_compatibility.hardware.min_logical_cpus
+      - (iris_bench_topology.numa_node_cpus | default({}) | length) >= iris_bench_compatibility.hardware.min_numa_nodes
+    fail_msg: >-
+      CPU/NUMA topology is below the compatibility minimum
+      (cores={{ iris_bench_topology.physical_cores }},
+      cpus={{ iris_bench_topology.logical_cpus }},
+      numa_nodes={{ iris_bench_topology.numa_node_cpus | default({}) | length }}).
+    quiet: true
+
+- name: Compatibility | check total memory
+  ansible.builtin.assert:
+    that:
+      - ansible_memtotal_mb | int >= (iris_bench_compatibility.hardware.min_memory_gib | int * 1024)
+    fail_msg: >-
+      Only {{ ansible_memtotal_mb }} MiB RAM; require
+      {{ iris_bench_compatibility.hardware.min_memory_gib }} GiB.
+    quiet: true
+
+- name: Compatibility | check root filesystem free space
+  ansible.builtin.assert:
+    that:
+      - (ansible_mounts | selectattr('mount', 'equalto', '/') | map(attribute='size_available') | first | int) >=
+        (iris_bench_compatibility.hardware.min_root_free_gib | int * 1024 * 1024 * 1024)
+    fail_msg: >-
+      Root filesystem has insufficient free space; require
+      {{ iris_bench_compatibility.hardware.min_root_free_gib }} GiB.
+    quiet: true
+
+- name: Compatibility | check cgroup v2 mount and controllers
+  ansible.builtin.command:
+    argv:
+      - cat
+      - /sys/fs/cgroup/cgroup.controllers
+  register: iris_bench_cgroup_controllers_raw
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+- name: Compatibility | assert cgroup v2 controllers
+  ansible.builtin.assert:
+    that:
+      - iris_bench_cgroup_controllers_raw.rc | default(1) == 0
+      - (iris_bench_compatibility.cgroup.required_controllers | difference((iris_bench_cgroup_controllers_raw.stdout | default('')).split())) | length == 0
+    fail_msg: >-
+      cgroup v2 not mounted or missing controllers. Found
+      '{{ iris_bench_cgroup_controllers_raw.stdout | default('') }}'.
+    quiet: true
+
+- name: Compatibility | check seccomp availability
+  ansible.builtin.stat:
+    path: /proc/sys/kernel/seccomp/actions_avail
+  register: iris_bench_seccomp_stat
+  when: iris_bench_compatibility.features.require_seccomp | bool
+
+- name: Compatibility | assert seccomp availability
+  ansible.builtin.assert:
+    that:
+      - iris_bench_seccomp_stat.stat.exists
+    fail_msg: "seccomp is required but /proc/sys/kernel/seccomp/actions_avail is absent."
+    quiet: true
+  when: iris_bench_compatibility.features.require_seccomp | bool
+
+- name: Compatibility | check namespace types
+  ansible.builtin.stat:
+    path: "/proc/self/ns/{{ item }}"
+  register: iris_bench_ns_stat
+  loop: "{{ iris_bench_compatibility.features.namespace_types }}"
+  changed_when: false
+
+- name: Compatibility | assert namespace types
+  ansible.builtin.assert:
+    that:
+      - iris_bench_ns_stat.results | map(attribute='stat.exists') | select('equalto', false) | list | length == 0
+    fail_msg: "One or more required Linux namespaces are unavailable."
+    quiet: true
+
+- name: Compatibility | read container runtime versions
+  ansible.builtin.command:
+    argv:
+      - /bin/sh
+      - -c
+      - >-
+        for c in docker containerd runc; do
+          present=yes; v=0.0.0;
+          if command -v "$c" >/dev/null 2>&1; then
+            v=$("$c" --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1);
+            [ -n "$v" ] || { present=no; v=0.0.0; };
+          else
+            present=no;
+          fi;
+          printf '%s=%s\n' "$c" "$v";
+          printf '%s_present=%s\n' "$c" "$present";
+        done
+  register: iris_bench_runtime_versions_raw
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+- name: Compatibility | publish container runtime versions
+  ansible.builtin.set_fact:
+    iris_bench_runtime_versions:
+      docker: "{{ (iris_bench_runtime_versions_raw.stdout | default('') | regex_findall('docker=([^\\n]+)') | first | default('0.0.0', true)) | trim }}"
+      containerd: "{{ (iris_bench_runtime_versions_raw.stdout | default('') | regex_findall('containerd=([^\\n]+)') | first | default('0.0.0', true)) | trim }}"
+      runc: "{{ (iris_bench_runtime_versions_raw.stdout | default('') | regex_findall('runc=([^\\n]+)') | first | default('0.0.0', true)) | trim }}"
+    iris_bench_runtime_present:
+      docker: "{{ (iris_bench_runtime_versions_raw.stdout | default('') | regex_findall('docker_present=([^\\n]+)') | first | default('no', true)) | trim }}"
+      containerd: "{{ (iris_bench_runtime_versions_raw.stdout | default('') | regex_findall('containerd_present=([^\\n]+)') | first | default('no', true)) | trim }}"
+      runc: "{{ (iris_bench_runtime_versions_raw.stdout | default('') | regex_findall('runc_present=([^\\n]+)') | first | default('no', true)) | trim }}"
+
+- name: Compatibility | assert container runtime versions
+  ansible.builtin.assert:
+    that:
+      - iris_bench_runtime_versions.docker is version(iris_bench_compatibility.container_runtime.docker_min, '>=')
+      - iris_bench_runtime_versions.containerd is version(iris_bench_compatibility.container_runtime.containerd_min, '>=')
+      - iris_bench_runtime_versions.runc is version(iris_bench_compatibility.container_runtime.runc_min, '>=')
+      - iris_bench_runtime_present.docker == 'yes'
+      - iris_bench_runtime_present.containerd == 'yes'
+      - iris_bench_runtime_present.runc == 'yes'
+    fail_msg: >-
+      Container runtime too old or missing:
+      docker='{{ iris_bench_runtime_versions.docker }}' (present={{ iris_bench_runtime_present.docker }})
+      containerd='{{ iris_bench_runtime_versions.containerd }}' (present={{ iris_bench_runtime_present.containerd }})
+      runc='{{ iris_bench_runtime_versions.runc }}' (present={{ iris_bench_runtime_present.runc }}).
+    quiet: true
+  when: iris_bench_require_container_runtime | bool
+
+- name: Compatibility | read clock synchronization state
+  ansible.builtin.command:
+    argv:
+      - timedatectl
+      - show
+      - --property=NTPSynchronized
+      - --value
+  register: iris_bench_clock_raw
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+- name: Compatibility | assert clock synchronization
+  ansible.builtin.assert:
+    that:
+      - (iris_bench_clock_raw.stdout | default('') | trim | lower) in ['yes', 'true']
+    fail_msg: >-
+      Host clock is not synchronized (timedatectl NTPSynchronized != yes).
+      Enable time synchronization before benchmarking.
+    quiet: true
+  when:
+    - iris_bench_compatibility.clock.require_synchronized | bool
+    - not (iris_bench_skip_clock_check | bool)
+
+- name: Compatibility | read firmware and microcode fingerprints
+  ansible.builtin.command:
+    argv:
+      - /bin/sh
+      - -c
+      - >-
+        echo "bios_version=$(dmidecode -s bios-version 2>/dev/null || echo unknown)";
+        echo "board_name=$(dmidecode -s baseboard-product-name 2>/dev/null || echo unknown)";
+        echo "microcode=$(cat /sys/devices/system/cpu/cpu0/microcode/version 2>/dev/null || echo unknown)";
+        echo "cpu_vendor=$(lscpu | sed -n 's/^Vendor ID:[[:space:]]*//p' | head -1)";
+        echo "cpu_model=$(lscpu | sed -n 's/^Model name:[[:space:]]*//p' | head -1)"
+  register: iris_bench_hw_fingerprint_raw
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+- name: Compatibility | publish hardware fingerprints
+  ansible.builtin.set_fact:
+    iris_bench_hardware_fingerprint:
+      bios_version: "{{ (iris_bench_hw_fingerprint_raw.stdout_lines | default([]) | select('search', '^bios_version=') | list | first | default('bios_version=unknown')) | regex_replace('^bios_version=', '') }}"
+      board_name: "{{ (iris_bench_hw_fingerprint_raw.stdout_lines | default([]) | select('search', '^board_name=') | list | first | default('board_name=unknown')) | regex_replace('^board_name=', '') }}"
+      microcode: "{{ (iris_bench_hw_fingerprint_raw.stdout_lines | default([]) | select('search', '^microcode=') | list | first | default('microcode=unknown')) | regex_replace('^microcode=', '') }}"
+      cpu_vendor: "{{ (iris_bench_hw_fingerprint_raw.stdout_lines | default([]) | select('search', '^cpu_vendor=') | list | first | default('cpu_vendor=unknown')) | regex_replace('^cpu_vendor=', '') }}"
+      cpu_model: "{{ (iris_bench_hw_fingerprint_raw.stdout_lines | default([]) | select('search', '^cpu_model=') | list | first | default('cpu_model=unknown')) | regex_replace('^cpu_model=', '') }}"
+
+- name: Compatibility | record virtualization capability
+  ansible.builtin.set_fact:
+    iris_bench_virtualization_flags: >-
+      {{ iris_bench_compatibility.features.virtualization_flags
+         | intersect(iris_bench_cpu_flags) }}
+
+- name: Compatibility | assert virtualization where required
+  ansible.builtin.assert:
+    that:
+      - iris_bench_virtualization_flags | length > 0
+    fail_msg: >-
+      Hardware virtualization is required but none of
+      {{ iris_bench_compatibility.features.virtualization_flags | join(', ') }}
+      is present in /proc/cpuinfo.
+    quiet: true
+  when: iris_bench_compatibility.features.require_virtualization | bool
+
+- name: Compatibility | set compatible flag
+  ansible.builtin.set_fact:
+    iris_bench_compatible: true

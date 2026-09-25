@@ -1,0 +1,83 @@
+---
+# Iris benchmark host role entry point.
+#
+# Provisioning order: guard -> read facts/topology -> compatibility -> packages
+# -> identity/dirs -> service cleanup -> K3s detection -> cgroup delegation ->
+# CPU policy -> IRQ affinity -> limits -> reboot (if required) -> effective
+# verification -> report.
+#
+# cgroup delegation is configured before the CPU policy unit starts because
+# iris-bench-cpu-policy.service runs inside iris-bench.slice. Starting the slice
+# before its Delegate= drop-in exists would leave the running slice undelegated,
+# and daemon-reload does not re-apply delegation to an already-running slice.
+#
+# All mutation is guarded by benchmark_host=true. The role never removes K3s
+# state and never targets a production node.
+
+- name: Load and enforce mutation guards
+  ansible.builtin.import_tasks: guards.yml
+
+- name: Gather read-only facts and derive topology
+  ansible.builtin.import_tasks: facts.yml
+
+- name: Evaluate the compatibility envelope
+  ansible.builtin.import_tasks: compatibility_checks.yml
+
+- name: Install measurement and policy packages
+  ansible.builtin.import_tasks: packages.yml
+
+- name: Create benchmark user, directories, and limits
+  ansible.builtin.import_tasks: users_dirs.yml
+
+- name: Disable unrelated host services
+  ansible.builtin.import_tasks: service_cleanup.yml
+
+- name: Detect and report Kubernetes residual state
+  ansible.builtin.import_tasks: k3s_residual.yml
+
+- name: Configure cgroup v2 delegation
+  ansible.builtin.import_tasks: cgroup_delegation.yml
+
+- name: Configure stable CPU policy
+  ansible.builtin.import_tasks: cpu_policy.yml
+
+- name: Route movable IRQ affinity
+  ansible.builtin.import_tasks: irq_affinity.yml
+
+- name: Apply kernel and sysctl settings
+  ansible.builtin.import_tasks: limits_sysctl.yml
+
+- name: Apply pending handlers before reboot decision
+  ansible.builtin.meta: flush_handlers
+
+- name: Reboot | compute reboot requirement
+  ansible.builtin.set_fact:
+    iris_bench_reboot_required: >-
+      {{ (iris_bench_force_reboot | bool) or
+         ((iris_bench_reboot | bool) and
+          (iris_bench_reboot_if_changed | bool) and
+          ((iris_bench_boot_setting_changed | bool) or
+           (iris_bench_cpu_unit.changed | default(false) | bool))) }}
+
+- name: Reboot | reboot when required for boot-time settings
+  ansible.builtin.reboot:
+    msg: "iris-bench provisioning reboot"
+    reboot_timeout: "{{ iris_bench_reboot_timeout }}"
+    pre_reboot_delay: "{{ iris_bench_pre_reboot_delay }}"
+    connect_timeout: 30
+  when: iris_bench_reboot_required | bool
+
+- name: Verify effective host state
+  ansible.builtin.import_tasks: verify.yml
+
+- name: Write qualification report
+  ansible.builtin.import_tasks: report.yml
+
+- name: Fail if effective-state verification found violations
+  ansible.builtin.assert:
+    that:
+      - iris_bench_verify_passed | default(false) | bool
+    fail_msg: >-
+      Effective-state verification failed after provisioning:
+      {{ iris_bench_verify_failures | default([]) | join('; ') }}
+    quiet: true

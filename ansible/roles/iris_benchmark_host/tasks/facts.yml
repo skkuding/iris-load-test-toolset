@@ -1,0 +1,135 @@
+---
+# Read-only fact gathering and topology-aware CPU partitioning.
+#
+# This file performs no mutation so it can be reused by scripts/qualify-host.sh.
+
+- name: Facts | locate python3 interpreter
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/env
+      - python3
+      - -c
+      - "import sys; print(sys.executable)"
+  register: iris_bench_python_raw
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+- name: Facts | set python interpreter
+  ansible.builtin.set_fact:
+    iris_bench_python: "{{ iris_bench_python_raw.stdout | default('/usr/bin/python3', true) | trim }}"
+
+- name: Facts | read per-CPU topology (lscpu -e -J)
+  ansible.builtin.command:
+    argv:
+      - lscpu
+      - -e
+      - -J
+  register: iris_bench_lscpu_raw
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+- name: Facts | read NUMA hardware map (numactl --hardware)
+  ansible.builtin.command:
+    argv:
+      - numactl
+      - --hardware
+  register: iris_bench_numactl_raw
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+- name: Facts | read CPU flags
+  ansible.builtin.command:
+    argv:
+      - /bin/sh
+      - -c
+      - "grep -m1 '^flags' /proc/cpuinfo | cut -d: -f2-"
+  register: iris_bench_cpu_flags_raw
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+- name: Facts | read effective governor
+  ansible.builtin.command:
+    argv:
+      - /bin/sh
+      - -c
+      - "cat /sys/devices/system/cpu/cpufreq/policy*/scaling_governor 2>/dev/null | sort -u | paste -sd, -"
+  register: iris_bench_gov_raw
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+- name: Facts | read effective turbo state
+  ansible.builtin.command:
+    argv:
+      - /bin/sh
+      - -c
+      - >-
+        if [ -r /sys/devices/system/cpu/intel_pstate/no_turbo ]; then
+          v=$(cat /sys/devices/system/cpu/intel_pstate/no_turbo);
+          [ "$v" = "1" ] && echo disabled || echo enabled;
+        elif [ -r /sys/devices/system/cpu/cpufreq/boost ]; then
+          v=$(cat /sys/devices/system/cpu/cpufreq/boost);
+          [ "$v" = "0" ] && echo disabled || echo enabled;
+        else
+          echo unavailable;
+        fi
+  register: iris_bench_turbo_raw
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+- name: Facts | read effective SMT control
+  ansible.builtin.command:
+    argv:
+      - /bin/sh
+      - -c
+      - "cat /sys/devices/system/cpu/smt/control 2>/dev/null || echo unavailable"
+  register: iris_bench_smt_raw
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+- name: Facts | read running kernel and command line
+  ansible.builtin.command:
+    argv:
+      - /bin/sh
+      - -c
+      - "uname -r; cat /proc/cmdline"
+  register: iris_bench_boot_raw
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+- name: Facts | compute housekeeping and benchmark CPU sets
+  ansible.builtin.command:
+    argv:
+      - "{{ iris_bench_python }}"
+      - "{{ role_path }}/files/iris_bench_topology.py"
+      - "--housekeeping-physical-cores-per-socket"
+      - "{{ iris_bench_housekeeping_physical_cores_per_socket }}"
+      - "--housekeeping-cpus"
+      - "{{ iris_bench_housekeeping_cpus }}"
+      - "--benchmark-cpus"
+      - "{{ iris_bench_benchmark_cpus }}"
+    stdin: "{{ iris_bench_lscpu_raw.stdout | default('', true) }}"
+  register: iris_bench_topology_raw
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+- name: Facts | publish derived facts
+  ansible.builtin.set_fact:
+    iris_bench_topology: "{{ iris_bench_topology_raw.stdout | default('{}', true) | from_json }}"
+    iris_bench_cpu_flags: "{{ (iris_bench_cpu_flags_raw.stdout | default('', true)).split() }}"
+    iris_bench_numactl: "{{ iris_bench_numactl_raw.stdout | default('', true) }}"
+    iris_bench_kernel_release: "{{ ansible_kernel.split('-')[0] }}"
+    iris_bench_effective:
+      governor: "{{ (iris_bench_gov_raw.stdout | default('', true)).strip() | default('unavailable', true) }}"
+      turbo: "{{ (iris_bench_turbo_raw.stdout | default('', true)).strip() | default('unavailable', true) }}"
+      smt: "{{ (iris_bench_smt_raw.stdout | default('', true)).strip() | default('unavailable', true) }}"
+      running_kernel: "{{ (iris_bench_boot_raw.stdout_lines | default(['', '']))[0] | default('unknown', true) }}"
+      kernel_cmdline: "{{ (iris_bench_boot_raw.stdout_lines | default(['', '']))[1] | default('', true) }}"

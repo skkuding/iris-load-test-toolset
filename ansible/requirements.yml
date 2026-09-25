@@ -1,0 +1,8 @@
+---
+# Collections required by the Iris benchmark host role.
+#
+# ansible.posix provides ansible.posix.sysctl. The role otherwise uses only
+# ansible.builtin so that syntax/lint checks work without extra dependencies.
+collections:
+  - name: ansible.posix
+    version: ">=2.0.0"

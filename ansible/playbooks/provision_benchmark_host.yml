@@ -1,0 +1,37 @@
+---
+# Provision and verify the approved Iris benchmark host.
+#
+# Usage (from the ansible/ directory, or with ANSIBLE_CONFIG set):
+#   ansible-playbook playbooks/provision_benchmark_host.yml --ask-become-pass
+#   ansible-playbook playbooks/provision_benchmark_host.yml -l codedang8 -e iris_bench_reboot=false
+#
+# The role refuses to run unless the target carries benchmark_host=true and is
+# on the compatibility allowlist. Production nodes are never targets.
+- name: Provision the Iris benchmark host
+  hosts: benchmark_hosts
+  gather_facts: true
+  become: true
+  any_errors_fatal: true
+
+  pre_tasks:
+    - name: Provision | print target identity
+      ansible.builtin.debug:
+        msg: >-
+          Provisioning {{ inventory_hostname }}
+          ({{ ansible_default_ipv4.address | default('unknown-address') }})
+          benchmark_host={{ benchmark_host | default(false) }}
+
+  roles:
+    - role: iris_benchmark_host
+
+  post_tasks:
+    - name: Provision | result summary
+      ansible.builtin.debug:
+        msg:
+          - "governor_effective={{ iris_bench_effective.governor | default('unknown') }}"
+          - "turbo_policy={{ iris_bench_turbo_policy }} turbo_effective={{ iris_bench_effective.turbo | default('unknown') }}"
+          - "smt_effective={{ iris_bench_effective.smt | default('unknown') }}"
+          - "housekeeping_cpus={{ iris_bench_topology.housekeeping_cpus | default([]) | join(',') }}"
+          - "benchmark_cpus={{ iris_bench_topology.benchmark_cpus | default([]) | join(',') }}"
+          - "k3s_residual={{ iris_bench_k3s_residual | default([]) | join(',') | default('none', true) }}"
+          - "report={{ iris_bench_report_path | default('not-written') }}"

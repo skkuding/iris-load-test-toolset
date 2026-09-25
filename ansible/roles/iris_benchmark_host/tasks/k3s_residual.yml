@@ -1,0 +1,97 @@
+---
+# Kubernetes residue: detect and report. NEVER remove.
+#
+# The server8 repurposing plan requires K3s state (notably
+# /var/lib/rancher/k3s/storage) to survive until Gate 6. This role only disables
+# the service, which is reversible. Running the K3s uninstall script or deleting
+# /var/lib/rancher/k3s is out of scope and is guarded below.
+
+- name: K3s | assert residual removal stays disabled
+  ansible.builtin.assert:
+    that:
+      - not (iris_bench_compatibility.kubernetes.remove_residual | bool)
+    fail_msg: >-
+      iris_bench_compatibility.kubernetes.remove_residual must remain false in
+      this role; K3s removal is a separate reviewed operation.
+    quiet: true
+
+- name: K3s | inspect residual paths
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  register: iris_bench_k3s_paths
+  loop: "{{ iris_bench_compatibility.kubernetes.residual_paths }}"
+  changed_when: false
+
+- name: K3s | inspect residual interfaces
+  ansible.builtin.command:
+    argv:
+      - ip
+      - -o
+      - link
+      - show
+  register: iris_bench_links_raw
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+- name: K3s | read residual service states
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - is-active
+      - "{{ item }}"
+  register: iris_bench_k3s_service_states
+  loop: "{{ iris_bench_k3s_services }}"
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+- name: K3s | publish residual inventory
+  ansible.builtin.set_fact:
+    iris_bench_k3s_residual: >-
+      {{ iris_bench_k3s_paths.results
+         | selectattr('stat.exists')
+         | map(attribute='item')
+         | list }}
+    iris_bench_k3s_residual_interfaces: >-
+      {{ iris_bench_compatibility.kubernetes.residual_interfaces
+         | select('in', iris_bench_links_raw.stdout | default(''))
+         | list }}
+    iris_bench_k3s_active_services: >-
+      {{ iris_bench_k3s_service_states.results
+         | selectattr('stdout', 'equalto', 'active')
+         | map(attribute='item')
+         | list }}
+
+- name: K3s | stop and disable residual services (non-destructive)
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: stopped
+    enabled: false
+  loop: "{{ iris_bench_k3s_active_services }}"
+  loop_control:
+    label: "{{ item }}"
+  when:
+    - iris_bench_disable_k3s_service | bool
+    - not ansible_check_mode
+
+- name: K3s | warn about residual state
+  ansible.builtin.debug:
+    msg:
+      - "WARNING: residual Kubernetes state was detected and is intentionally NOT removed."
+      - "paths={{ iris_bench_k3s_residual | join(', ') | default('none', true) }}"
+      - "interfaces={{ iris_bench_k3s_residual_interfaces | join(', ') | default('none', true) }}"
+      - "active_services={{ iris_bench_k3s_active_services | join(', ') | default('none', true) }}"
+      - "K3s uninstall is gated on the server8 repurposing plan Gate 6."
+  when: iris_bench_k3s_residual | length > 0 or iris_bench_k3s_residual_interfaces | length > 0
+
+- name: K3s | fail when residual state is disallowed
+  ansible.builtin.assert:
+    that:
+      - iris_bench_k3s_residual | length == 0
+      - iris_bench_k3s_active_services | length == 0
+    fail_msg: >-
+      Kubernetes residual state detected:
+      {{ (iris_bench_k3s_residual + iris_bench_k3s_active_services) | join(', ') }}
+    quiet: true
+  when: iris_bench_fail_on_k3s_residual | bool

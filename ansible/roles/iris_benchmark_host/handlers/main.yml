@@ -1,0 +1,12 @@
+---
+- name: Reload systemd daemon
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Apply tmpfiles iris-bench
+  ansible.builtin.command:
+    argv:
+      - systemd-tmpfiles
+      - --create
+      - /etc/tmpfiles.d/iris-bench.conf
+  changed_when: false

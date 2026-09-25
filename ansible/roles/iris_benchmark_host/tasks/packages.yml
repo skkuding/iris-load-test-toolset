@@ -1,0 +1,27 @@
+---
+# Pinned runtime and measurement packages.
+#
+# Pinning policy: entries without `version` follow the distribution. Exact
+# digest/version pinning for the benchmark toolchain and Judger artifact belongs
+# to the run manifest, not to this host role. Replace an entry with
+#   {name: <pkg>, version: <exact-version>}
+# to pin here as well.
+
+- name: Packages | install measurement and cpufreq tooling
+  ansible.builtin.apt:
+    name: "{{ item.name }}{{ ('=' ~ item.version) if (item.version | default('') | length > 0) else '' }}"
+    state: "{{ item.state | default('present') }}"
+    update_cache: true
+    cache_valid_time: 3600
+  loop: "{{ iris_bench_packages }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: iris_bench_install_packages | bool
+  register: iris_bench_packages_result
+
+- name: Packages | report installed package count
+  ansible.builtin.debug:
+    msg: >-
+      package task changed={{ iris_bench_packages_result.changed | default(false) }}
+      count={{ iris_bench_packages_result.results | default([]) | length }}
+  when: iris_bench_packages_result is defined

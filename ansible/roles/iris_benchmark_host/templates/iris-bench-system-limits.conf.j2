@@ -1,0 +1,7 @@
+# Managed by the iris_benchmark_host Ansible role.
+# Explicit system-wide resource and file limits. Keep these generous: the
+# benchmark measures CPU-time stability, not limit-induced failures.
+[Manager]
+{% for key, value in iris_bench_default_limits.items() %}
+{{ key }}={{ value }}
+{% endfor %}

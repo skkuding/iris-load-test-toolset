@@ -1,0 +1,119 @@
+---
+# cgroup v2 delegation for the benchmark user and slice.
+#
+# The agent needs a delegated subtree it can manage without unrestricted sudo.
+# This role provides:
+#   - a delegated iris-bench.slice for containers, RabbitMQ, Iris, and sandboxes;
+#   - a user-manager delegate drop-in so the benchmark user can create cgroup
+#     subtrees below its own slice;
+#   - explicit system limits.
+# It never writes to /sys/fs/cgroup directly and never touches another user's
+# delegated cgroups.
+
+- name: Cgroup | read mounted controllers
+  ansible.builtin.command:
+    argv:
+      - cat
+      - /sys/fs/cgroup/cgroup.controllers
+  register: iris_bench_cgroup_mount_raw
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+- name: Cgroup | assert cgroup v2 controllers are available
+  ansible.builtin.assert:
+    that:
+      - (iris_bench_compatibility.cgroup.required_controllers | difference((iris_bench_cgroup_mount_raw.stdout | default('')).split())) | length == 0
+    fail_msg: >-
+      cgroup v2 controllers missing:
+      {{ iris_bench_compatibility.cgroup.required_controllers | difference((iris_bench_cgroup_mount_raw.stdout | default('')).split()) | join(', ') }}
+    quiet: true
+
+- name: Cgroup | create systemd drop-in directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - /etc/systemd/system/iris-bench.slice.d
+    - /etc/systemd/system/user@.service.d
+    # system.conf drop-ins live directly under /etc/systemd, NOT under
+    # /etc/systemd/system. A drop-in placed at /etc/systemd/system/system.conf.d
+    # is never read by PID 1, so the global limits below would silently not apply.
+    - /etc/systemd/system.conf.d
+  loop_control:
+    label: "{{ item }}"
+
+# Correct hosts provisioned by an earlier revision that wrote the limits drop-in
+# to the wrong directory. The file was never parsed, so it is safe to remove.
+- name: Cgroup | remove legacy mislocated limits drop-in
+  ansible.builtin.file:
+    path: /etc/systemd/system/system.conf.d/10-iris-bench-limits.conf
+    state: absent
+  notify: Reload systemd daemon
+
+- name: Cgroup | remove legacy mislocated limits directory when empty
+  ansible.builtin.command:
+    argv:
+      - rmdir
+      - /etc/systemd/system/system.conf.d
+  register: iris_bench_legacy_limits_dir
+  changed_when: iris_bench_legacy_limits_dir.rc == 0
+  failed_when: false
+  when: not ansible_check_mode
+
+- name: Cgroup | install iris-bench.slice delegation drop-in
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/iris-bench.slice.d/10-delegate.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by the iris_benchmark_host Ansible role.
+      # Delegate cpu/cpuset/memory/pids/io so the benchmark agent can create
+      # per-run and per-worker subtrees without touching the host root cgroup.
+      [Slice]
+      Delegate=yes
+      CPUAccounting=yes
+      MemoryAccounting=yes
+      TasksAccounting=yes
+  notify: Reload systemd daemon
+
+- name: Cgroup | install user manager delegation drop-in
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/user@.service.d/10-iris-bench-delegate.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by the iris_benchmark_host Ansible role.
+      # Required so a login session or systemd-run scope owned by the benchmark
+      # user receives a delegated cgroup subtree on cgroup v2.
+      [Service]
+      Delegate={{ iris_bench_delegate_controllers }}
+  notify: Reload systemd daemon
+
+- name: Cgroup | install default limit drop-in
+  ansible.builtin.template:
+    src: iris-bench-system-limits.conf.j2
+    dest: /etc/systemd/system.conf.d/10-iris-bench-limits.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd daemon
+
+- name: Cgroup | reload systemd and start delegated slice
+  ansible.builtin.systemd:
+    name: "{{ iris_bench_slice }}"
+    state: started
+    daemon_reload: true
+  register: iris_bench_slice_result
+
+- name: Cgroup | report slice delegation
+  ansible.builtin.debug:
+    msg:
+      - "slice={{ iris_bench_slice }}"
+      - "delegate_controllers={{ iris_bench_delegate_controllers }}"
+      - "limits={{ iris_bench_default_limits }}"

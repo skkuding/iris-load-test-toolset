@@ -1,0 +1,181 @@
+---
+# Defaults for the Iris benchmark host role.
+#
+# Every value is overridable from inventory, --extra-vars, or a vars file. The
+# explicit safety guard is benchmark_host=true in the target inventory; see
+# tasks/guards.yml.
+
+# ---- Identity and safety -------------------------------------------------
+# benchmark_host must be set to true explicitly for the target host. It is
+# false at group level so an accidental inventory addition cannot provision.
+benchmark_host: false
+iris_bench_compatibility_file: "{{ playbook_dir }}/../../config/compatibility.yaml"
+iris_bench_expected_nodename: ""
+
+# ---- Dedicated user and directories --------------------------------------
+iris_bench_user: iris-bench
+iris_bench_group: iris-bench
+iris_bench_opt_dir: /opt/iris-bench
+iris_bench_versions_dir: /opt/iris-bench/bin
+iris_bench_sbin_dir: /opt/iris-bench/sbin
+iris_bench_state_dir: /var/lib/iris-bench
+iris_bench_run_dir: /run/iris-bench
+iris_bench_etc_dir: /etc/iris-bench
+
+# ---- cgroup v2 delegation ------------------------------------------------
+iris_bench_slice: iris-bench.slice
+iris_bench_delegate_controllers: "cpu cpuset memory pids io"
+iris_bench_default_limits:
+  DefaultLimitNOFILE: 1048576
+  DefaultLimitNPROC: 65536
+  DefaultLimitMEMLOCK: infinity
+  DefaultTasksMax: 65536
+iris_bench_user_limits:
+  nofile: 1048576
+  nproc: 65536
+  memlock: unlimited
+
+# ---- Packages ------------------------------------------------------------
+# Runtime container packages are expected from the base image. Measurement and
+# cpufreq tooling is installed here. Pin versions by replacing an entry with
+#   {name: <pkg>, version: <exact-version>}
+# Exact pinning is a tracked gap; see the role prerequisites.
+iris_bench_require_container_runtime: true
+iris_bench_install_packages: true
+iris_bench_packages:
+  - name: util-linux
+  - name: numactl
+  - name: linux-tools-common
+  - name: linux-tools-generic
+  - name: cpufrequtils
+  - name: ethtool
+  - name: pciutils
+  - name: lm-sensors
+  - name: iproute2
+  - name: chrony
+  - name: python3
+
+# ---- CPU policy ----------------------------------------------------------
+iris_bench_cpu_governor: performance
+# The authoritative default comes from the production-node read-only survey
+# recorded in config/compatibility.yaml.
+iris_bench_turbo_policy: "{{ iris_bench_compatibility.cpu_policy.turbo_policy | default('placeholder') }}"
+iris_bench_smt_policy: detect
+iris_bench_housekeeping_physical_cores_per_socket: 1
+# Comma-separated overrides. Empty means topology-derived.
+iris_bench_housekeeping_cpus: ""
+iris_bench_benchmark_cpus: ""
+iris_bench_turbo_msr_fallback: false   # MSR writes are not attempted by default
+iris_bench_irq_exclude: []             # extra IRQ numbers to leave untouched
+iris_bench_strict_irq_check: false     # when true, movable IRQs on benchmark CPUs fail
+
+# ---- sysctl --------------------------------------------------------------
+iris_bench_manage_sysctl: true
+iris_bench_sysctl:
+  kernel.numa_balancing: 0
+  kernel.sched_autogroup_enabled: 0
+  vm.swappiness: 1
+  vm.zone_reclaim_mode: 0
+
+# ---- Service cleanup -----------------------------------------------------
+# Stop + disable + mask unrelated desktop, printing, discovery, indexing,
+# update, remote-desktop, crash, and balancing services. Keep SSH, networking,
+# time synchronization, logging, and the container runtime.
+iris_bench_apply_service_cleanup: true
+iris_bench_report_only_service_cleanup: false
+# Services that must remain active for SSH, logging, and the container runtime.
+iris_bench_require_active_services:
+  - ssh
+  - docker
+  - containerd
+iris_bench_keep_services:
+  - ssh
+  - sshd
+  - systemd-networkd
+  - NetworkManager
+  - systemd-resolved
+  - systemd-timesyncd
+  - chrony
+  - chronyd
+  - ntp
+  - systemd-journald
+  - rsyslog
+  - docker
+  - containerd
+  - dbus
+  - polkit
+  - cron
+iris_bench_disable_services:
+  # desktop / display manager
+  - gdm
+  - gdm3
+  - gnome-remote-desktop
+  - gnome-initial-setup
+  - colord
+  - switcheroo-control
+  - rtkit-daemon
+  # printing
+  - cups
+  - cups-browsed
+  # discovery / peripherals
+  - avahi-daemon
+  - ModemManager
+  - bluetooth
+  # indexing / content
+  - tracker-miner-fs
+  - tracker-miner-fs-3
+  - tracker-extract-3
+  - tracker-store
+  - localsearch-3
+  - rygel
+  # firmware / updates / crash reporting
+  - fwupd
+  - packagekit
+  - unattended-upgrades
+  - apport
+  - whoopsie
+  - kerneloops
+  - snapd
+  - snapd.seeded
+  # power / thermal / balancing (would fight the pinned CPU policy)
+  - power-profiles-daemon
+  - thermald
+  - irqbalance
+iris_bench_disable_sockets:
+  - avahi-daemon.socket
+  - cups.socket
+  - cups.path
+  - snapd.socket
+iris_bench_disable_timers:
+  - fwupd-refresh.timer
+  - apt-daily.timer
+  - apt-daily-upgrade.timer
+  - motd-news.timer
+iris_bench_disable_snapd: true
+
+# ---- Kubernetes residue --------------------------------------------------
+# Detect and report; never remove. Removing K3s state is a separate reviewed
+# operation gated on the server8 repurposing plan (Gate 6). Disabling the
+# service is non-destructive and can be reverted.
+iris_bench_detect_k3s_residual: true
+iris_bench_disable_k3s_service: true
+iris_bench_k3s_services:
+  - k3s
+  - k3s-agent
+iris_bench_fail_on_k3s_residual: false
+
+# ---- Reboot and effective verification -----------------------------------
+# On the first changed run the role reboots once and then re-checks effective
+# state; an idempotent second run does not reboot.
+iris_bench_reboot: true
+iris_bench_reboot_if_changed: true
+iris_bench_force_reboot: false
+iris_bench_boot_setting_changed: false
+iris_bench_reboot_timeout: 900
+iris_bench_pre_reboot_delay: 5
+iris_bench_verify_after_reboot: true
+iris_bench_skip_clock_check: false
+
+# ---- Reporting -----------------------------------------------------------
+iris_bench_report_dir: "{{ lookup('env', 'IRIS_BENCH_REPORT_DIR') | default('/tmp/iris-bench-qualification', true) }}"
+iris_bench_write_report: true

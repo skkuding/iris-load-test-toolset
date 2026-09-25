@@ -1,0 +1,28 @@
+---
+# ansible-lint configuration for the benchmark host automation.
+# Run from THIS directory so the config is discovered:
+#   cd ansible && ansible-lint
+# Running `ansible-lint ansible` from the repository root does not pick up this
+# file (it is not in a parent directory of the CWD) and reports var-naming noise.
+#
+# Keep the profile permissive enough for hardware/read-only command reads while
+# still catching unsafe module usage. Tighten after the first lint run on a
+# machine that has ansible-lint installed.
+profile: production
+
+skip_list:
+  - risky-file-permissions        # explicit modes are set per task where required
+  - command-instead-of-shell      # sysfs/read-only reads intentionally use command
+  - command-instead-of-module     # cpufreq/turbo/irq have no first-class module
+  - no-changed-when               # read-only commands set changed_when explicitly
+  - name[template]                # loops use item names by design
+  - yaml[line-length]             # ssh_args and assertions exceed 80 columns
+  - galaxy[version-incorrect]     # collection range is expressed in requirements.yml
+  - var-naming[no-role-prefix]     # role variables use the project iris_bench_ prefix
+
+warn_list:
+  - experimental
+
+exclude_paths:
+  - .cache/
+  - collections/

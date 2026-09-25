@@ -1,0 +1,60 @@
+---
+# Read-only qualification of the approved Iris benchmark host.
+#
+# This playbook performs no mutation. It gathers effective host state, evaluates
+# the compatibility envelope in config/compatibility.yaml, runs the same
+# effective-state assertions used after provisioning, and writes a JSON report
+# on the controller.
+#
+# Usage:
+#   scripts/qualify-host.sh codedang8
+#   ansible-playbook playbooks/qualify_host.yml -l codedang8 --ask-become-pass
+- name: Qualify the Iris benchmark host (read-only)
+  hosts: benchmark_hosts
+  gather_facts: true
+  become: true
+  any_errors_fatal: true
+
+  tasks:
+    - name: Qualify | enforce target identity guards
+      ansible.builtin.include_role:
+        name: iris_benchmark_host
+        tasks_from: guards
+
+    - name: Qualify | load effective host facts and topology
+      ansible.builtin.include_role:
+        name: iris_benchmark_host
+        tasks_from: facts
+
+    - name: Qualify | evaluate compatibility envelope
+      ansible.builtin.include_role:
+        name: iris_benchmark_host
+        tasks_from: compatibility_checks
+
+    - name: Qualify | evaluate effective benchmark state
+      ansible.builtin.include_role:
+        name: iris_benchmark_host
+        tasks_from: verify
+
+    - name: Qualify | write report
+      ansible.builtin.include_role:
+        name: iris_benchmark_host
+        tasks_from: report
+
+    - name: Qualify | fail when effective state is outside the envelope
+      ansible.builtin.assert:
+        that:
+          - iris_bench_verify_passed | default(false) | bool
+        fail_msg: >-
+          Qualification failed:
+          {{ iris_bench_verify_failures | default([]) | join('; ') }}
+        quiet: true
+
+    - name: Qualify | comply summary
+      ansible.builtin.debug:
+        msg:
+          - "compatible={{ iris_bench_compatible | default(false) }}"
+          - "governor_effective={{ iris_bench_effective.governor | default('unknown') }}"
+          - "turbo_policy={{ iris_bench_turbo_policy }} turbo_effective={{ iris_bench_effective.turbo | default('unknown') }}"
+          - "smt_effective={{ iris_bench_effective.smt | default('unknown') }}"
+          - "report={{ iris_bench_report_path | default('not-written') }}"

@@ -1,0 +1,68 @@
+---
+# Stable CPU policy: governor, turbo, and SMT. The policy is applied immediately
+# and re-applied at boot by iris-bench-cpu-policy.service. Effective state is
+# verified later by tasks/verify.yml, never inferred from config alone.
+
+- name: CPU | install CPU policy script
+  ansible.builtin.copy:
+    src: iris_bench_apply_cpu_policy.sh
+    dest: "{{ iris_bench_sbin_dir }}/iris_bench_apply_cpu_policy.sh"
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: CPU | record configured turbo policy
+  ansible.builtin.copy:
+    dest: "{{ iris_bench_etc_dir }}/turbo-policy"
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by the iris_benchmark_host Ansible role.
+      policy={{ iris_bench_turbo_policy }}
+      source={{ iris_bench_compatibility.cpu_policy.turbo_policy_source | default('unset') }}
+      note=placeholder means unchanged and is valid only for diagnostic runs.
+
+- name: CPU | install boot-time CPU policy unit
+  ansible.builtin.template:
+    src: iris-bench-cpu-policy.service.j2
+    dest: /etc/systemd/system/iris-bench-cpu-policy.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd daemon
+
+- name: CPU | enable and start boot-time CPU policy unit
+  ansible.builtin.systemd:
+    name: iris-bench-cpu-policy.service
+    enabled: true
+    state: started
+    daemon_reload: true
+  register: iris_bench_cpu_unit
+
+- name: CPU | apply effective CPU policy now
+  ansible.builtin.command:
+    argv:
+      - "{{ iris_bench_sbin_dir }}/iris_bench_apply_cpu_policy.sh"
+      - "--governor"
+      - "{{ iris_bench_cpu_governor }}"
+      - "--turbo"
+      - "{{ iris_bench_turbo_policy }}"
+      - "--smt"
+      - "{{ iris_bench_smt_policy }}"
+  register: iris_bench_cpu_apply
+  changed_when: (iris_bench_cpu_apply.stdout | from_json).changed | bool
+  failed_when: not ((iris_bench_cpu_apply.stdout | default('{}', true) | from_json).ok | default(false) | bool)
+  when: not ansible_check_mode
+
+- name: CPU | publish effective CPU policy
+  ansible.builtin.set_fact:
+    iris_bench_cpu_apply_json: "{{ iris_bench_cpu_apply.stdout | default('{}', true) | from_json }}"
+
+- name: CPU | warn when turbo policy is still a placeholder
+  ansible.builtin.debug:
+    msg:
+      - "WARNING: turbo policy is 'placeholder'; effective turbo is unchanged."
+      - "Recorded effective turbo state: {{ iris_bench_cpu_apply_json.turbo.effective | default('unknown') }}"
+      - "Runs with a placeholder policy are non-comparable until the coordinator supplies the production-derived effective default."
+  when: iris_bench_turbo_policy == 'placeholder'

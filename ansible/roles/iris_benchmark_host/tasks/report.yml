@@ -1,0 +1,79 @@
+---
+# Write a sanitized JSON qualification/provisioning report on the controller.
+# Contains no credentials or connection strings.
+
+- name: Report | ensure controller report directory exists
+  ansible.builtin.file:
+    path: "{{ iris_bench_report_dir }}"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Report | assemble report
+  ansible.builtin.set_fact:
+    iris_bench_report:
+      schema: iris-benchmark-qualification/v1
+      generated_at: "{{ ansible_date_time.iso8601 | default('unknown') }}"
+      inventory_hostname: "{{ inventory_hostname }}"
+      nodename: "{{ ansible_nodename }}"
+      default_ipv4: "{{ ansible_default_ipv4.address | default('') }}"
+      compatibility_schema: "{{ iris_bench_compatibility.schema }}"
+      compatible: "{{ iris_bench_compatible | default(false) }}"
+      architecture: "{{ ansible_architecture }}"
+      distribution: "{{ ansible_distribution }} {{ ansible_distribution_version }}"
+      kernel: "{{ iris_bench_effective.running_kernel | default(ansible_kernel) }}"
+      kernel_cmdline: "{{ iris_bench_effective.kernel_cmdline | default('') }}"
+      cpu_flags: "{{ iris_bench_cpu_flags | default([]) }}"
+      hardware_fingerprint: "{{ iris_bench_hardware_fingerprint | default({}) }}"
+      virtualization_flags: "{{ iris_bench_virtualization_flags | default([]) }}"
+      runtime_versions: "{{ iris_bench_runtime_versions | default({}) }}"
+      topology: "{{ iris_bench_topology | default({}) }}"
+      effective:
+        governor: "{{ iris_bench_effective.governor | default('unknown') }}"
+        turbo: "{{ iris_bench_effective.turbo | default('unknown') }}"
+        smt: "{{ iris_bench_effective.smt | default('unknown') }}"
+      configured_cpu_policy:
+        governor: "{{ iris_bench_cpu_governor }}"
+        turbo: "{{ iris_bench_turbo_policy }}"
+        turbo_source: "{{ iris_bench_compatibility.cpu_policy.turbo_policy_source | default('unset') }}"
+        smt: "{{ iris_bench_smt_policy }}"
+        housekeeping_physical_cores_per_socket: "{{ iris_bench_housekeeping_physical_cores_per_socket }}"
+      sysctl: "{{ iris_bench_sysctl }}"
+      cleanup_present: "{{ iris_bench_cleanup_present | default({}) }}"
+      k3s_residual:
+        paths: "{{ iris_bench_k3s_residual | default([]) }}"
+        interfaces: "{{ iris_bench_k3s_residual_interfaces | default([]) }}"
+        active_services: "{{ iris_bench_k3s_active_services | default([]) }}"
+        removal_performed: false
+      verification:
+        failures: "{{ iris_bench_verify_failures | default([]) }}"
+        warnings: "{{ iris_bench_verify_warnings | default([]) }}"
+      effective_manager_limits: "{{ iris_bench_manager_limits_effective | default({}) }}"
+      delegated_slice:
+        unit: "{{ iris_bench_slice }}"
+        delegate: "{{ iris_bench_slice_delegate.stdout | default('') | trim }}"
+        subtree_control: "{{ iris_bench_slice_subtree_control | default('unknown') }}"
+        procs: "{{ iris_bench_slice_procs | default('unknown') }}"
+      cpu_policy_unit:
+        active: "{{ iris_bench_cpu_unit_active | default('unknown') }}"
+        enabled: "{{ iris_bench_cpu_unit_enabled | default('unknown') }}"
+      comparison_keys: "{{ iris_bench_compatibility.comparison_keys }}"
+      qualification_thresholds: "{{ iris_bench_compatibility.qualification }}"
+      known_gaps:
+        - "exact package and Judger digest pinning is recorded in the run manifest, not this host report"
+
+- name: Report | write report on controller
+  ansible.builtin.copy:
+    dest: "{{ iris_bench_report_dir }}/{{ inventory_hostname }}-{{ ansible_date_time.iso8601_basic_short | default('report') }}.json"
+    mode: "0644"
+    content: "{{ iris_bench_report | to_nice_json }}\n"
+  delegate_to: localhost
+  become: false
+  register: iris_bench_report_write
+  when: iris_bench_write_report | bool
+
+- name: Report | publish report path
+  ansible.builtin.set_fact:
+    iris_bench_report_path: "{{ iris_bench_report_write.dest | default('not-written') }}"

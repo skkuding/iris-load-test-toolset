@@ -1,0 +1,95 @@
+---
+# Dedicated benchmark identity, directories, systemd runtime dir, and limits.
+
+- name: Identity | create benchmark group
+  ansible.builtin.group:
+    name: "{{ iris_bench_group }}"
+    system: true
+
+- name: Identity | create benchmark user
+  ansible.builtin.user:
+    name: "{{ iris_bench_user }}"
+    group: "{{ iris_bench_group }}"
+    system: true
+    create_home: true
+    home: "/home/{{ iris_bench_user }}"
+    shell: /bin/bash
+    comment: "Iris runtime benchmark agent"
+    state: present
+
+- name: Directories | create dedicated directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - path: "{{ iris_bench_opt_dir }}"
+      owner: root
+      group: root
+      mode: "0755"
+    - path: "{{ iris_bench_versions_dir }}"
+      owner: root
+      group: root
+      mode: "0755"
+    - path: "{{ iris_bench_sbin_dir }}"
+      owner: root
+      group: root
+      mode: "0755"
+    - path: "{{ iris_bench_etc_dir }}"
+      owner: root
+      group: root
+      mode: "0755"
+    - path: "{{ iris_bench_state_dir }}"
+      owner: "{{ iris_bench_user }}"
+      group: "{{ iris_bench_group }}"
+      mode: "0750"
+    - path: "{{ iris_bench_state_dir }}/runs"
+      owner: "{{ iris_bench_user }}"
+      group: "{{ iris_bench_group }}"
+      mode: "0750"
+    # Create the tmpfs runtime directory now, not only through the tmpfiles
+    # handler at flush time. iris-bench-cpu-policy.service runs earlier and its
+    # ExecStart tees into this directory; missing it would fail the first run.
+    - path: "{{ iris_bench_run_dir }}"
+      owner: "{{ iris_bench_user }}"
+      group: "{{ iris_bench_group }}"
+      mode: "0750"
+  loop_control:
+    label: "{{ item.path }}"
+
+- name: Identity | describe directories
+  ansible.builtin.debug:
+    msg:
+      - "{{ iris_bench_opt_dir }} (root, immutable tool staging)"
+      - "{{ iris_bench_versions_dir }} (versioned agent binaries)"
+      - "{{ iris_bench_state_dir }} ({{ iris_bench_user }}-owned evidence and non-secret state)"
+
+- name: Limits | create user limits drop-in
+  ansible.builtin.copy:
+    dest: /etc/security/limits.d/iris-bench.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by the iris_benchmark_host Ansible role. Explicit resource and
+      # file limits for the dedicated benchmark user.
+      {{ iris_bench_user }} soft nofile {{ iris_bench_user_limits.nofile }}
+      {{ iris_bench_user }} hard nofile {{ iris_bench_user_limits.nofile }}
+      {{ iris_bench_user }} soft nproc {{ iris_bench_user_limits.nproc }}
+      {{ iris_bench_user }} hard nproc {{ iris_bench_user_limits.nproc }}
+      {{ iris_bench_user }} soft memlock {{ iris_bench_user_limits.memlock }}
+      {{ iris_bench_user }} hard memlock {{ iris_bench_user_limits.memlock }}
+
+- name: Runtime | create tmpfiles entry for the runtime directory
+  ansible.builtin.copy:
+    dest: /etc/tmpfiles.d/iris-bench.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by the iris_benchmark_host Ansible role. /run is tmpfs-backed and
+      # holds per-run runtime credentials, PIDs, sockets, and environment files.
+      d {{ iris_bench_run_dir }} 0750 {{ iris_bench_user }} {{ iris_bench_group }} -
+  notify: Apply tmpfiles iris-bench

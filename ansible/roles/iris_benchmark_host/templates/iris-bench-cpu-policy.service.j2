@@ -1,0 +1,20 @@
+[Unit]
+Description=Iris benchmark CPU policy (governor, turbo, SMT)
+Documentation=https://github.com/skkuding/codedang
+# Run after the runtime directory exists so the JSON snapshot can be written.
+After=systemd-tmpfiles-setup.service
+Wants=systemd-tmpfiles-setup.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Run inside the delegated slice so the slice (and its Delegate= setting) is
+# loaded at boot even before any benchmark container starts. RemainAfterExit
+# keeps this unit active, which keeps the slice resident.
+Slice={{ iris_bench_slice }}
+# The script is idempotent and emits JSON describing the effective state. The
+# JSON is captured to tmpfs for qualification/reporting.
+ExecStart=/bin/bash -c 'set -o pipefail; {{ iris_bench_sbin_dir }}/iris_bench_apply_cpu_policy.sh --governor {{ iris_bench_cpu_governor }} --turbo {{ iris_bench_turbo_policy }} --smt {{ iris_bench_smt_policy }} | tee {{ iris_bench_run_dir }}/cpu-policy.json'
+
+[Install]
+WantedBy=multi-user.target

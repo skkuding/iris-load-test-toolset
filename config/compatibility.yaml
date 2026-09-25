@@ -1,0 +1,169 @@
+---
+# Iris runtime benchmark host compatibility envelope.
+#
+# This file is the single source of truth for "what makes a supported benchmark
+# host". It is loaded read-only by:
+#   - ansible/roles/iris_benchmark_host (asserts during provisioning/qualification)
+#   - scripts/qualify-host.sh (read-only report)
+#
+# Hardware, firmware, kernel, and topology values are comparison keys, not just
+# pass/fail gates: a host that meets the envelope but differs on a comparison key
+# belongs to a different benchmark population. See PROPOSE.md "Compatibility
+# envelope" and "Qualification capture".
+#
+# No secret or credential value belongs in this file.
+
+schema: iris-benchmark-compatibility/v1
+
+iris_bench_compatibility:
+  schema: iris-benchmark-compatibility/v1
+  # Target identity and mutation guard. The load-test inventory must contain only
+  # these allowed hosts. Production nodes are read-only and must never be targets.
+  host:
+    allowed_hosts:
+      - codedang8
+    # Production nodes that must never receive this role, even if a mistaken
+    # inventory entry is supplied. server8/codedang8 is intentionally absent.
+    forbidden_production_hosts:
+      - server5.skkuding.dev
+      - server6.skkuding.dev
+      - server7.skkuding.dev
+      - server9.skkuding.dev
+    forbidden_production_ips:
+      - 115.145.172.194
+      - 115.145.172.195
+      - 115.145.172.196
+      - 115.145.172.198
+    # Optional defense-in-depth. Empty string disables the nodename equality
+    # check; the allowlist plus forbidden list remain authoritative.
+    expected_nodename: ""
+
+  architecture:
+    machines:
+      - x86_64
+    required_cpu_flags:
+      - lm
+      - sse4_2
+    recommended_cpu_flags:
+      - avx2
+
+  # cgroup v2 with delegated controllers is required for Judger containment.
+  cgroup:
+    version: 2
+    required_controllers:
+      - cpuset
+      - cpu
+      - memory
+      - pids
+      - io
+
+  os:
+    ids:
+      - ubuntu
+    versions:
+      - "24.04"
+    kernel_min: "7.0.0"
+    kernel_max: "7.0.99"
+
+  hardware:
+    min_physical_cores: 4
+    min_logical_cpus: 8
+    min_numa_nodes: 1
+    min_memory_gib: 24
+    min_root_free_gib: 100
+
+  features:
+    require_seccomp: true
+    namespace_types:
+      - pid
+      - net
+      - mnt
+      - ipc
+      - uts
+      - user
+    # Bare metal exposes vmx/svm. A guest may not; when false the value is
+    # recorded but not enforced.
+    require_virtualization: false
+    virtualization_flags:
+      - vmx
+      - svm
+
+  container_runtime:
+    docker_min: "29.0.0"
+    containerd_min: "2.0.0"
+    runc_min: "1.2.0"
+
+  clock:
+    require_synchronized: true
+    max_offset_seconds: 1.0
+
+  # Kubernetes residue is reported, never removed. K3s uninstall is a separate,
+  # reviewed operation gated on the server8 repurposing plan; this role must not
+  # delete /var/lib/rancher/k3s or run the uninstall script.
+  kubernetes:
+    forbidden_active_services:
+      - k3s
+      - k3s-agent
+    residual_paths:
+      - /usr/local/bin/k3s
+      - /usr/bin/k3s
+      - /var/lib/rancher/k3s
+      - /etc/rancher/k3s
+      - /var/lib/kubelet
+      - /etc/kubernetes
+      - /var/lib/cni
+      - /etc/cni
+      - /run/k3s
+      - /run/kubelet
+    residual_interfaces:
+      - cni0
+      - flannel.1
+    remove_residual: false
+
+  # Production nodes codedang5, codedang6, codedang7, and codedang9 were
+  # inspected read-only on 2026-09-25. All had turbo enabled, expressed as
+  # intel_pstate/no_turbo=0 or cpufreq/boost=1.
+  cpu_policy:
+    governor: performance
+    turbo_policy: enabled
+    turbo_policy_source: production-nodes-read-only-2026-09-25
+    turbo_policy_allowed:
+      - placeholder
+      - enabled
+      - disabled
+    smt_policy: detect
+    smt_policy_allowed:
+      - detect
+      - enabled
+      - disabled
+    # Reserve this many complete physical cores (all sibling threads) per socket
+    # for the OS, SSH, irq handling, Docker, RabbitMQ, and Iris.
+    housekeeping_physical_cores_per_socket: 1
+
+  comparison_keys:
+    - cpu_model
+    - cpu_family
+    - cpu_stepping
+    - microcode
+    - socket_count
+    - physical_cores
+    - smt
+    - numa_topology
+    - firmware_bios
+    - kernel
+    - container_runtime
+    - host_profile
+    - image_digest
+    - judger_digest
+    - toolchain
+    - fixture
+    - dependency_generation
+
+  # Thresholds for the direct one-worker baseline. They are intentionally loose
+  # until the first controlled dataset exists (see PROPOSE.md success criteria).
+  qualification:
+    cpu_time_cv_max_percent: 3.0
+    median_change_max_percent: 5.0
+    p95_change_max_percent: 5.0
+    within_block_drift_max_percent: 3.0
+    idle_settle_seconds: 60

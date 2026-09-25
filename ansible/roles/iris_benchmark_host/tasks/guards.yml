@@ -1,0 +1,64 @@
+---
+# Mutation guards. These run before any change and fail closed.
+#
+# Rationale: production nodes share the same hardware as the benchmark host. The
+# only trustworthy authorization is an explicit benchmark_host=true plus an
+# allowlist entry. Host-key policy and the operator's SSH aliases are preserved
+# by the OpenSSH invocation (see ansible/ansible.cfg).
+
+- name: Guards | load compatibility envelope
+  ansible.builtin.include_vars:
+    file: "{{ iris_bench_compatibility_file }}"
+  when: iris_bench_compatibility is not defined
+
+- name: Guards | require a resolved compatibility envelope
+  ansible.builtin.assert:
+    that:
+      - iris_bench_compatibility is defined
+      - iris_bench_compatibility.host is defined
+      - iris_bench_compatibility.host.allowed_hosts | length > 0
+    fail_msg: >-
+      Could not load a valid compatibility envelope from
+      {{ iris_bench_compatibility_file }}.
+
+- name: Guards | require explicit benchmark_host=true
+  ansible.builtin.assert:
+    that:
+      - benchmark_host | default(false) | bool
+    fail_msg: >-
+      Refusing to provision {{ inventory_hostname }}. This role mutates host
+      state. Set benchmark_host=true on the specific host in the load-test
+      inventory only after confirming it is not a production node.
+    success_msg: "benchmark_host=true confirmed for {{ inventory_hostname }}"
+    quiet: true
+
+- name: Guards | require host on the benchmark allowlist
+  ansible.builtin.assert:
+    that:
+      - inventory_hostname in iris_bench_compatibility.host.allowed_hosts
+    fail_msg: >-
+      {{ inventory_hostname }} is not in
+      iris_bench_compatibility.host.allowed_hosts
+      ({{ iris_bench_compatibility.host.allowed_hosts | join(', ') }}).
+    quiet: true
+
+- name: Guards | refuse production hosts and addresses
+  ansible.builtin.assert:
+    that:
+      - inventory_hostname not in iris_bench_compatibility.host.forbidden_production_hosts
+      - (ansible_default_ipv4.address | default('')) not in iris_bench_compatibility.host.forbidden_production_ips
+      - (ansible_all_ipv4_addresses | default([])) | intersect(iris_bench_compatibility.host.forbidden_production_ips) | length == 0
+    fail_msg: >-
+      {{ inventory_hostname }} resolves to a production address. Production
+      nodes are read-only and must never be mutation targets.
+    quiet: true
+
+- name: Guards | enforce optional expected nodename
+  ansible.builtin.assert:
+    that:
+      - ansible_nodename == iris_bench_compatibility.host.expected_nodename
+    fail_msg: >-
+      Nodename {{ ansible_nodename }} does not match expected
+      {{ iris_bench_compatibility.host.expected_nodename }}.
+    quiet: true
+  when: iris_bench_compatibility.host.expected_nodename | length > 0

@@ -1,0 +1,98 @@
+---
+# Stop, disable, and mask unrelated host services. This is intentionally not a
+# package removal: no package is purged, so every change is reversible by
+# unmasking and re-enabling. SSH, networking, time synchronization, logging, and
+# the container runtime are never touched.
+
+- name: Cleanup | assert keep and disable lists do not overlap
+  ansible.builtin.assert:
+    that:
+      - (iris_bench_keep_services | intersect(iris_bench_disable_services)) | length == 0
+      - (iris_bench_keep_services | intersect(iris_bench_disable_sockets)) | length == 0
+    fail_msg: >-
+      A service appears in both the keep and disable lists:
+      {{ (iris_bench_keep_services | intersect(iris_bench_disable_services)) | union(iris_bench_keep_services | intersect(iris_bench_disable_sockets)) | join(', ') }}
+    quiet: true
+
+- name: Cleanup | gather service facts
+  ansible.builtin.service_facts:
+
+- name: Cleanup | list installed service, socket, timer, and path units
+  ansible.builtin.command:
+    argv:
+      - /bin/sh
+      - -c
+      - "systemctl list-unit-files --type=service,socket,timer,path --no-legend --plain | awk '{print $1}'"
+  register: iris_bench_units_raw
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+- name: Cleanup | publish available unit names
+  ansible.builtin.set_fact:
+    iris_bench_units_available: "{{ iris_bench_units_raw.stdout_lines | default([]) | map('trim') | select() | list }}"
+
+- name: Cleanup | record present units targeted for cleanup
+  ansible.builtin.set_fact:
+    iris_bench_cleanup_present:
+      services: >-
+        {{ iris_bench_disable_services
+           | map('regex_replace', '$', '.service')
+           | select('in', iris_bench_units_available)
+           | list }}
+      sockets: >-
+        {{ iris_bench_disable_sockets
+           | select('in', iris_bench_units_available)
+           | list }}
+      timers: >-
+        {{ iris_bench_disable_timers
+           | select('in', iris_bench_units_available)
+           | list }}
+
+- name: Cleanup | stop, disable, and mask unrelated services
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: stopped
+    enabled: false
+    masked: true
+  loop: "{{ iris_bench_cleanup_present.services }}"
+  loop_control:
+    label: "{{ item }}"
+  when:
+    - iris_bench_apply_service_cleanup | bool
+    - not (iris_bench_report_only_service_cleanup | bool)
+  notify: Reload systemd daemon
+
+- name: Cleanup | stop, disable, and mask unrelated sockets
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: stopped
+    enabled: false
+    masked: true
+  loop: "{{ iris_bench_cleanup_present.sockets }}"
+  loop_control:
+    label: "{{ item }}"
+  when:
+    - iris_bench_apply_service_cleanup | bool
+    - not (iris_bench_report_only_service_cleanup | bool)
+
+- name: Cleanup | stop, disable, and mask unrelated timers
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: stopped
+    enabled: false
+    masked: true
+  loop: "{{ iris_bench_cleanup_present.timers }}"
+  loop_control:
+    label: "{{ item }}"
+  when:
+    - iris_bench_apply_service_cleanup | bool
+    - not (iris_bench_report_only_service_cleanup | bool)
+
+- name: Cleanup | report planned cleanup
+  ansible.builtin.debug:
+    msg:
+      - "apply={{ iris_bench_apply_service_cleanup }} report_only={{ iris_bench_report_only_service_cleanup }}"
+      - "services_present={{ iris_bench_cleanup_present.services | join(', ') }}"
+      - "sockets_present={{ iris_bench_cleanup_present.sockets | join(', ') }}"
+      - "timers_present={{ iris_bench_cleanup_present.timers | join(', ') }}"

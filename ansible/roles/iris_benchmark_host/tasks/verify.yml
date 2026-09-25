@@ -1,0 +1,389 @@
+---
+# Post-provision / post-reboot effective-state assertions.
+#
+# Configuration-file contents are not proof. Every check here reads effective
+# kernel, sysfs, systemd, or cpuset state. Failures are collected so the report
+# lists all of them at once, then asserted together.
+
+- name: Verify | initialize failure accumulator
+  ansible.builtin.set_fact:
+    iris_bench_verify_failures: []
+    iris_bench_verify_warnings: []
+
+- name: Verify | assert disjoint CPU sets
+  ansible.builtin.assert:
+    that:
+      - iris_bench_topology.housekeeping_cpus | default([]) | length > 0
+      - iris_bench_topology.benchmark_cpus | default([]) | length > 0
+      - (iris_bench_topology.housekeeping_cpus | intersect(iris_bench_topology.benchmark_cpus)) | length == 0
+      - iris_bench_topology.benchmark_physical_cores | default([]) | length > 0
+    fail_msg: >-
+      Derived CPU partitioning is invalid:
+      housekeeping={{ iris_bench_topology.housekeeping_cpus | default([]) | join(',') }}
+      benchmark={{ iris_bench_topology.benchmark_cpus | default([]) | join(',') }}
+    quiet: true
+
+# facts.yml read governor/turbo/SMT at the start of the role, before cpu_policy
+# (and any reboot) applied the policy. Re-read live state so verification and
+# the report describe the post-apply state, not the pre-provision state.
+- name: Verify | re-read effective CPU policy state
+  ansible.builtin.command:
+    argv:
+      - /bin/sh
+      - -c
+      - >-
+        gov=$(cat /sys/devices/system/cpu/cpufreq/policy*/scaling_governor 2>/dev/null | sort -u | paste -sd, -);
+        if [ -r /sys/devices/system/cpu/intel_pstate/no_turbo ]; then
+          v=$(cat /sys/devices/system/cpu/intel_pstate/no_turbo); [ "$v" = "1" ] && t=disabled || t=enabled;
+        elif [ -r /sys/devices/system/cpu/cpufreq/boost ]; then
+          v=$(cat /sys/devices/system/cpu/cpufreq/boost); [ "$v" = "0" ] && t=disabled || t=enabled;
+        else
+          t=unavailable;
+        fi;
+        smt=$(cat /sys/devices/system/cpu/smt/control 2>/dev/null || echo unavailable);
+        printf '{"governor":"%s","turbo":"%s","smt":"%s"}\n' "${gov:-unavailable}" "$t" "$smt"
+  register: iris_bench_cpu_effective_raw
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+- name: Verify | publish live effective CPU policy state
+  ansible.builtin.set_fact:
+    iris_bench_effective: >-
+      {{ iris_bench_effective | combine(iris_bench_cpu_effective_raw.stdout | default('{}', true) | from_json) }}
+
+- name: Verify | check effective governor
+  ansible.builtin.set_fact:
+    iris_bench_verify_failures: >-
+      {{ iris_bench_verify_failures + ['governor:' ~ iris_bench_effective.governor] }}
+  when:
+    - iris_bench_effective.governor != iris_bench_cpu_governor
+    - iris_bench_effective.governor != 'unavailable'
+
+- name: Verify | warn when cpufreq is unavailable
+  ansible.builtin.set_fact:
+    iris_bench_verify_warnings: >-
+      {{ iris_bench_verify_warnings + ['governor unavailable (no cpufreq driver)'] }}
+  when: iris_bench_effective.governor == 'unavailable'
+
+- name: Verify | check effective turbo policy
+  ansible.builtin.set_fact:
+    iris_bench_verify_failures: >-
+      {{ iris_bench_verify_failures + ['turbo:' ~ iris_bench_effective.turbo] }}
+  when:
+    - iris_bench_turbo_policy in ['enabled', 'disabled']
+    - iris_bench_effective.turbo != iris_bench_turbo_policy
+
+- name: Verify | warn when turbo policy is placeholder
+  ansible.builtin.set_fact:
+    iris_bench_verify_warnings: >-
+      {{ iris_bench_verify_warnings + ['turbo policy placeholder; effective=' ~ iris_bench_effective.turbo ~ '; run is non-comparable'] }}
+  when: iris_bench_turbo_policy == 'placeholder'
+
+- name: Verify | check effective SMT policy
+  ansible.builtin.set_fact:
+    iris_bench_verify_failures: >-
+      {{ iris_bench_verify_failures + ['smt:' ~ iris_bench_effective.smt] }}
+  when:
+    - iris_bench_smt_policy in ['enabled', 'disabled']
+    - >-
+      (iris_bench_smt_policy == 'enabled' and iris_bench_effective.smt != 'on') or
+      (iris_bench_smt_policy == 'disabled' and iris_bench_effective.smt not in ['off', 'forceoff'])
+
+- name: Verify | read effective sysctl values
+  ansible.builtin.command:
+    argv:
+      - sysctl
+      - -n
+      - "{{ item.key }}"
+  register: iris_bench_sysctl_effective
+  loop: "{{ iris_bench_sysctl | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when: iris_bench_manage_sysctl | bool
+
+- name: Verify | accumulate sysctl mismatches
+  ansible.builtin.set_fact:
+    iris_bench_verify_failures: >-
+      {{ iris_bench_verify_failures + ['sysctl:' ~ item.item.key ~ '=' ~ (item.stdout | default('')) ] }}
+  loop: "{{ iris_bench_sysctl_effective.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.key }}"
+  when: (item.stdout | default('')) | trim != (item.item.value | string)
+
+- name: Verify | gather service facts
+  ansible.builtin.service_facts:
+
+- name: Verify | read state of disabled service, socket, timer, and path units
+  ansible.builtin.command:
+    argv:
+      - /bin/sh
+      - -c
+      - >-
+        for u in {{ ((iris_bench_disable_services | map('regex_replace', '$', '.service') | list) + iris_bench_disable_sockets + iris_bench_disable_timers) | join(' ') }}; do
+          state=$(systemctl is-active "$u" 2>/dev/null || true);
+          printf '%s=%s\n' "$u" "${state:-unknown}";
+        done
+  register: iris_bench_disabled_units_raw
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+- name: Verify | accumulate still-active disabled units
+  ansible.builtin.set_fact:
+    iris_bench_verify_failures: >-
+      {{ iris_bench_verify_failures + ['unit-active:' ~ (item | regex_replace('=.*$', ''))] }}
+  loop: "{{ iris_bench_disabled_units_raw.stdout_lines | default([]) }}"
+  loop_control:
+    label: "{{ item }}"
+  when: (item | regex_replace('^[^=]+=', '')) == 'active'
+
+- name: Verify | accumulate inactive required services
+  ansible.builtin.set_fact:
+    iris_bench_verify_failures: >-
+      {{ iris_bench_verify_failures + ['service-inactive:' ~ item] }}
+  loop: "{{ iris_bench_require_active_services }}"
+  loop_control:
+    label: "{{ item }}"
+  when:
+    - (item ~ '.service') in ansible_facts.services
+    - ansible_facts.services[item ~ '.service'].state != 'active'
+
+- name: Verify | check delegated slice unit
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - show
+      - "{{ iris_bench_slice }}"
+      - --property=Delegate
+      - --value
+  register: iris_bench_slice_delegate
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+- name: Verify | accumulate slice delegation failures
+  ansible.builtin.set_fact:
+    iris_bench_verify_failures: >-
+      {{ iris_bench_verify_failures + ['cgroup-delegate:' ~ (iris_bench_slice_delegate.stdout | default(''))] }}
+  when: (iris_bench_slice_delegate.stdout | default('') | trim) not in ['yes']
+
+# The agent only accepts a containment parent whose cgroup.subtree_control
+# already exposes the controllers it writes and whose cgroup.procs is empty.
+# Delegate=yes is not proof; read the delegated cgroup itself.
+- name: Verify | read delegated slice cgroup state
+  ansible.builtin.command:
+    argv:
+      - /bin/sh
+      - -c
+      - >-
+        printf 'subtree_control=%s\n' "$(cat /sys/fs/cgroup/{{ iris_bench_slice }}/cgroup.subtree_control 2>/dev/null || echo MISSING)";
+        printf 'procs=%s\n' "$(cat /sys/fs/cgroup/{{ iris_bench_slice }}/cgroup.procs 2>/dev/null | wc -l)"
+  register: iris_bench_slice_cgroup_raw
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+- name: Verify | publish delegated slice cgroup state
+  ansible.builtin.set_fact:
+    iris_bench_slice_subtree_control: >-
+      {{ (iris_bench_slice_cgroup_raw.stdout_lines | default([])
+          | select('search', '^subtree_control=')
+          | map('regex_replace', '^subtree_control=', '')
+          | first | default('MISSING', true)) | trim }}
+    iris_bench_slice_procs: >-
+      {{ (iris_bench_slice_cgroup_raw.stdout_lines | default([])
+          | select('search', '^procs=')
+          | map('regex_replace', '^procs=', '')
+          | first | default('0', true)) | trim }}
+
+- name: Verify | accumulate missing containment controllers
+  ansible.builtin.set_fact:
+    iris_bench_verify_failures: >-
+      {{ iris_bench_verify_failures + ['cgroup-slice-controller:' ~ item] }}
+  loop:
+    - cpu
+    - cpuset
+  loop_control:
+    label: "{{ item }}"
+  when: item not in (iris_bench_slice_subtree_control | default('')).split()
+
+- name: Verify | warn about missing non-critical delegated controllers
+  ansible.builtin.set_fact:
+    iris_bench_verify_warnings: >-
+      {{ iris_bench_verify_warnings + ['cgroup-slice-controller-missing:' ~ item] }}
+  loop: "{{ iris_bench_delegate_controllers.split() | difference(['cpu', 'cpuset']) }}"
+  loop_control:
+    label: "{{ item }}"
+  when: item not in (iris_bench_slice_subtree_control | default('')).split()
+
+- name: Verify | accumulate processes in the delegated slice
+  ansible.builtin.set_fact:
+    iris_bench_verify_failures: >-
+      {{ iris_bench_verify_failures + ['cgroup-slice-processes:' ~ (iris_bench_slice_procs | default('0'))] }}
+  when: (iris_bench_slice_procs | default('0') | int) > 0
+
+# Global limits: read the manager's effective defaults rather than trusting the
+# [Manager] drop-in. This is the check that would have caught the wrong
+# /etc/systemd/system/system.conf.d path.
+- name: Verify | read effective manager default limits
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - show
+      - --property=DefaultLimitNOFILE
+      - --property=DefaultLimitNPROC
+      - --property=DefaultLimitMEMLOCK
+      - --property=DefaultTasksMax
+  register: iris_bench_manager_limits_raw
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+- name: Verify | publish effective manager default limits
+  ansible.builtin.set_fact:
+    iris_bench_manager_limits_effective:
+      DefaultLimitNOFILE: >-
+        {{ (iris_bench_manager_limits_raw.stdout_lines | default([]) | select('search', '^DefaultLimitNOFILE=') | map('regex_replace', '^DefaultLimitNOFILE=', '') | first | default('', true)) | trim }}
+      DefaultLimitNPROC: >-
+        {{ (iris_bench_manager_limits_raw.stdout_lines | default([]) | select('search', '^DefaultLimitNPROC=') | map('regex_replace', '^DefaultLimitNPROC=', '') | first | default('', true)) | trim }}
+      DefaultLimitMEMLOCK: >-
+        {{ (iris_bench_manager_limits_raw.stdout_lines | default([]) | select('search', '^DefaultLimitMEMLOCK=') | map('regex_replace', '^DefaultLimitMEMLOCK=', '') | first | default('', true)) | trim }}
+      DefaultTasksMax: >-
+        {{ (iris_bench_manager_limits_raw.stdout_lines | default([]) | select('search', '^DefaultTasksMax=') | map('regex_replace', '^DefaultTasksMax=', '') | first | default('', true)) | trim }}
+
+- name: Verify | warn when manager default limits are unavailable
+  ansible.builtin.set_fact:
+    iris_bench_verify_warnings: >-
+      {{ iris_bench_verify_warnings + ['manager-limits-unavailable'] }}
+  when: (iris_bench_manager_limits_effective.DefaultLimitNOFILE | default('')) | length == 0
+
+- name: Verify | accumulate manager limit mismatches
+  ansible.builtin.set_fact:
+    iris_bench_verify_failures: >-
+      {{ iris_bench_verify_failures + ['limit:' ~ item.key ~ '=' ~ (iris_bench_manager_limits_effective[item.key] | default('missing'))] }}
+  loop: "{{ iris_bench_default_limits | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when:
+    - (iris_bench_manager_limits_effective[item.key] | default('')) | length > 0
+    - (iris_bench_manager_limits_effective[item.key] | default('')) != (item.value | string)
+
+- name: Verify | inspect systemd limits drop-in paths
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  register: iris_bench_limits_dropin
+  loop:
+    - /etc/systemd/system.conf.d/10-iris-bench-limits.conf
+    - /etc/systemd/system/system.conf.d/10-iris-bench-limits.conf
+  loop_control:
+    label: "{{ item }}"
+  changed_when: false
+
+- name: Verify | accumulate missing limits drop-in
+  ansible.builtin.set_fact:
+    iris_bench_verify_failures: >-
+      {{ iris_bench_verify_failures + ['limits-dropin-missing:/etc/systemd/system.conf.d/10-iris-bench-limits.conf'] }}
+  when: not (iris_bench_limits_dropin.results[0].stat.exists | default(false))
+
+- name: Verify | warn about legacy mislocated limits drop-in
+  ansible.builtin.set_fact:
+    iris_bench_verify_warnings: >-
+      {{ iris_bench_verify_warnings + ['legacy-limits-dropin:/etc/systemd/system/system.conf.d/10-iris-bench-limits.conf'] }}
+  when: iris_bench_limits_dropin.results[1].stat.exists | default(false)
+
+# The CPU policy must survive reboot, so the boot-time unit must be active and
+# enabled, not merely applied once during provisioning.
+- name: Verify | read boot-time CPU policy unit state
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - show
+      - iris-bench-cpu-policy.service
+      - --property=ActiveState
+      - --property=UnitFileState
+  register: iris_bench_cpu_unit_state_raw
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+- name: Verify | publish boot-time CPU policy unit state
+  ansible.builtin.set_fact:
+    iris_bench_cpu_unit_active: >-
+      {{ (iris_bench_cpu_unit_state_raw.stdout_lines | default([]) | select('search', '^ActiveState=') | map('regex_replace', '^ActiveState=', '') | first | default('unknown', true)) | trim }}
+    iris_bench_cpu_unit_enabled: >-
+      {{ (iris_bench_cpu_unit_state_raw.stdout_lines | default([]) | select('search', '^UnitFileState=') | map('regex_replace', '^UnitFileState=', '') | first | default('unknown', true)) | trim }}
+
+- name: Verify | accumulate boot-time CPU policy unit failures
+  ansible.builtin.set_fact:
+    iris_bench_verify_failures: >-
+      {{ iris_bench_verify_failures + ['cpu-policy-unit:' ~ iris_bench_cpu_unit_active ~ '/' ~ iris_bench_cpu_unit_enabled] }}
+  when: >-
+    iris_bench_cpu_unit_active != 'active' or
+    iris_bench_cpu_unit_enabled != 'enabled'
+
+- name: Verify | inspect required directories
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  register: iris_bench_verify_dirs
+  loop:
+    - "{{ iris_bench_opt_dir }}"
+    - "{{ iris_bench_versions_dir }}"
+    - "{{ iris_bench_state_dir }}"
+    - "{{ iris_bench_etc_dir }}"
+    - "{{ iris_bench_run_dir }}"
+  changed_when: false
+
+- name: Verify | accumulate missing directories
+  ansible.builtin.set_fact:
+    iris_bench_verify_failures: >-
+      {{ iris_bench_verify_failures + ['dir-missing:' ~ item.item] }}
+  loop: "{{ iris_bench_verify_dirs.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: not (item.stat.exists | default(false))
+
+- name: Verify | check IRQ affinity drift (dry run)
+  ansible.builtin.command:
+    argv:
+      - "{{ iris_bench_python }}"
+      - "{{ role_path }}/files/iris_bench_set_irq_affinity.py"
+      - "--cpus"
+      - "{{ iris_bench_topology.housekeeping_cpus | join(',') }}"
+      - "--dry-run"
+  register: iris_bench_irq_drift
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when: not ansible_check_mode
+
+- name: Verify | publish IRQ drift count
+  ansible.builtin.set_fact:
+    iris_bench_irq_drift_count: >-
+      {{ (iris_bench_irq_drift.stdout | default('{}', true) | from_json).changed_count | default(0) | int }}
+  when: not ansible_check_mode
+
+- name: Verify | accumulate IRQ drift
+  ansible.builtin.set_fact:
+    iris_bench_verify_failures: >-
+      {{ iris_bench_verify_failures + [('irq-drift:' ~ (iris_bench_irq_drift_count | default(0) | string))] }}
+  when:
+    - iris_bench_strict_irq_check | bool
+    - (iris_bench_irq_drift_count | default(0) | int) > 0
+
+- name: Verify | publish verification result
+  ansible.builtin.set_fact:
+    iris_bench_effective_verify:
+      failures: "{{ iris_bench_verify_failures }}"
+      warnings: "{{ iris_bench_verify_warnings }}"
+    iris_bench_verify_passed: "{{ iris_bench_verify_failures | length == 0 }}"
+
+- name: Verify | report effective checks
+  ansible.builtin.debug:
+    msg:
+      - "passed={{ iris_bench_verify_passed }}"
+      - "failures={{ iris_bench_verify_failures }}"
+      - "warnings={{ iris_bench_verify_warnings }}"

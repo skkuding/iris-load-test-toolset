@@ -1,0 +1,18 @@
+---
+# Load-test inventory. Contains ONLY the approved benchmark host.
+#
+# Do not add production nodes. Production hosts are inspected read-only through
+# existing SSH control sockets; they are never Ansible mutation targets.
+#
+# `codedang8` is an operator SSH alias (server8, skkuding-4f-4). User, port, and
+# jump settings come from ~/.ssh/config so this inventory follows the operator's
+# existing host configuration and ~/.ssh/sockets control sockets.
+
+all:
+  children:
+    benchmark_hosts:
+      hosts:
+        codedang8:
+          benchmark_host: true
+      vars:
+        benchmark_host: false

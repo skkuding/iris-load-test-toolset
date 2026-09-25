@@ -1,0 +1,17 @@
+---
+# Kernel tuning for reproducible placement and scheduling. Applied through
+# /etc/sysctl.d so the values survive reboot and are verifiable.
+
+- name: Sysctl | apply benchmark kernel parameters
+  ansible.posix.sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    state: present
+    sysctl_file: /etc/sysctl.d/99-iris-bench.conf
+    sysctl_set: true
+    reload: true
+    ignoreerrors: true
+  loop: "{{ iris_bench_sysctl | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}={{ item.value }}"
+  when: iris_bench_manage_sysctl | bool
