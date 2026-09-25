@@ -89,6 +89,12 @@ go build -o bin/judger-bench     ./cmd/judger-bench
 Common:
 
 - Go toolchain (see `go.mod`) and `g++` for compile tests.
+- `ansible-core`, plus the collection the host role requires:
+  `ansible-galaxy collection install -r ansible/requirements.yml`
+  (`ansible.posix` is required by the role's sysctl task and is **not**
+  committed to the repository).
+- Docker with `buildx` **only** if you use `--resolve-image` or build
+  `images/judger-bench.Dockerfile`; otherwise supply digests explicitly.
 - An SSH alias/host-key entry for the benchmark host, and a working
   non-interactive path to it. **Verify it before anything else.** The controller
   builds its own control socket (`paths.socketDir`, default `~/.ssh/sockets`,
@@ -96,6 +102,8 @@ Common:
   `ControlPath=~/.ssh/sockets/%h.sock`. These are different names, so an
   operator socket you already have (for example `codedang8.sock`) is **not**
   automatically reused. Configure a key or your own `ControlPath` and confirm.
+- Optional: `cp .env.example .env` to load the documented non-secret names,
+  endpoints, and ARNs locally. `.env` is git-ignored.
 - For qualification/provisioning: `sudo`/become access on the host. Server hosts
   in this environment have **no passwordless sudo**, so `--ask-become-pass` and
   an interactive terminal are required.
@@ -112,12 +120,17 @@ Track A additionally:
   API is reachable from your operator machine.
 - A production-derived RDS snapshot identifier (approved, read-only to
   discover).
-- `jq`, `base64`, and a way to run the publisher/collector driver (see §3).
+- `jq`, `base64`, and a publisher/collector driver. **The Track A manifests,
+  RabbitMQ CRs, and driver are not part of this repository**; see §3 and the
+  portability limits in §11.
 
 Track B additionally:
 
 - The dedicated benchmark RDS clone and S3 bucket exist and are reachable
   (`LOG.md`; `.env.example`), and the read-only DB role is bootstrapped.
+  **Creating that infrastructure is documented in `README.md` and `infra/aws/`;
+  this manual assumes it already exists in your account.** A different account
+  or operator cannot create it from this manual alone.
 - For the AWS fixture/secret scripts: AWS CLI v2, `jq`, and `psql` (a
   containerized `psql` wrapper is provided as `scripts/aws/psql-container.sh`).
 
@@ -129,6 +142,12 @@ This mutates a cluster: cordon/drain a node, create `rabbitmq.com` CRs, deploy
 `iris-bench`, and restore a temp RDS. Treat it as a production operation; get
 explicit approval for the target node and time window, and never drain a node
 that still serves production without a drain plan.
+
+The Kubernetes manifests, RabbitMQ custom resources, and the AMQP
+publisher/collector driver used by the original run are **not in this
+repository**. Track A is documented here for context and reconstruction; a
+fresh machine must author or obtain those artifacts. This is called out again in
+§11.
 
 Summary of the procedure:
 
@@ -210,8 +229,13 @@ Notes from real use:
 - `--resolve-image` needs Docker with `buildx`. If it is unavailable, pass
   `--iris-digest` explicitly (the `.env.example` value is a reviewed cache, not
   a guarantee).
+- The `isolated-1s` profile uses `cpuList: "2-3"` (two CPUs). For a strict
+  one-CPU baseline, use the `isolated-1s-single-cpu` profile.
 - `iris-benchctl provision`, `qualify`, `analyze`, and `resume` are **not
   implemented**. Host provisioning/qualification use the Ansible role.
+- `scripts/qualify-host.sh` is read-only but runs `become: true` and ends in
+  post-provision assertions, so it **only passes after** `provision`. On a fresh
+  host it fails at `Gathering Facts` (no credentials) or at the assertions.
 
 Host qualification and provisioning (requires sudo/become and a provisioned
 host):
@@ -347,3 +371,25 @@ reason. Never write credentials or full connection strings into a bundle.
 - [ ] Run A then C (or the direct baseline), capturing raw samples and PSI.
 - [ ] Analyze; write the evidence bundle; mark COMPLETE only if all checks pass.
 - [ ] Clean up and verify the exit state.
+
+---
+
+## 11. Portability limits
+
+This repository is intended to be operable on another machine by another person.
+As of this review, the following are honest limits:
+
+- **Track A is not self-contained.** The Kubernetes manifests, RabbitMQ custom
+  resources, and publisher/collector driver are not in this repository. Only the
+  method is documented.
+- **Track B assumes existing AWS resources.** The
+  `codedang-iris-benchmark` RDS clone, S3 bucket, KMS key, and IAM roles are
+  created from `README.md`/`infra/aws/` and are account-specific. Another
+  account must create its own.
+- **The Iris digest is a cache, not a resolution.** Without Docker/buildx you
+  cannot re-resolve `ghcr.io/skkuding/codedang-iris:stage` from the repo alone.
+- **The agent and Judger are external.** The controller does not stage
+  `iris-bench-agent`, and the alpha.4 Judger binary is dowloaded by the image
+  build; neither ships as a committed binary.
+- **Measurement remains gated.** Gate 0 (Judger containment) and the
+  unimplemented full-Iris/AMQP suite block an accepted end-to-end measurement.

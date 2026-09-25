@@ -111,7 +111,9 @@ host qualification/provisioning foundation.
 
 - Validate `docs/WAVE1-REPLICATION.md` with repeated fresh-operator runs and
   refine it from their gap reports.
-- Run read-only qualification on server8 before any provisioning decision.
+- Provision server8, then run read-only qualification. `scripts/qualify-host.sh`
+  is read-only but asserts post-provision state, so it cannot pass before
+  provisioning.
 - Resolve the Judger containment blocker before accepting measurements.
 
 ## Blockers
