@@ -136,7 +136,6 @@ variable "port" {
   description = "Database port (source-compatible)."
   type        = number
   default     = 5433
-  sensitive   = true
 }
 
 variable "parameter_group_name" {
