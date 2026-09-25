@@ -20,6 +20,7 @@ sample_state_bucket="codedang-tf-state"
 sample_state_key="terraform/iris-benchmark.tfstate"
 sample_lock_table="terraform-state-lock"
 sample_source_snapshot_arn="arn:aws:rds:ap-northeast-2:219857217698:snapshot:rds:example-source-2026"
+sample_vpc_id="vpc-0123456789abcdef0"
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "${tmp}"' EXIT
@@ -58,6 +59,7 @@ if "${bootstrap}" --render-only --output-dir "${rendered}" \
   --state-bucket "${sample_state_bucket}" \
   --state-key "${sample_state_key}" \
   --lock-table "${sample_lock_table}" \
+  --vpc-id "${sample_vpc_id}" \
   --source-snapshot-arn "${sample_source_snapshot_arn}" >/dev/null 2>&1; then
   pass "render-only produced the policy documents"
 else
@@ -141,7 +143,12 @@ required_actions=(
   "dynamodb:DeleteItem"
   "rds:DescribeDBSnapshots"
   "rds:CopyDBSnapshot"
+  "rds:ListTagsForResource"
+  "rds:ResetDBParameterGroup"
   "kms:CreateKey"
+  "kms:CreateAlias"
+  "kms:UpdateAlias"
+  "kms:ListAliases"
   "kms:Decrypt"
   "secretsmanager:GetSecretValue"
   "iam:CreateRole"
@@ -150,6 +157,10 @@ required_actions=(
   "iam:CreateServiceLinkedRole"
   "ec2:DescribeSecurityGroups"
   "ec2:CreateSecurityGroup"
+  "s3:GetBucketCORS"
+  "s3:GetBucketWebsite"
+  "s3:GetBucketObjectLockConfiguration"
+  "s3:DeleteBucketLifecycle"
 )
 for action in "${required_actions[@]}"; do
   if grep -Fxq -- "${action}" <<<"${role_actions}"; then
@@ -172,17 +183,102 @@ assert_jq "${all_role_policies}" '
                  or . == "rds:CopyDBSnapshot"
                  or . == "secretsmanager:GetSecretValue"
                  or . == "iam:CreateRole"
+                 or . == "kms:CreateAlias"
                  or . == "ec2:CreateSecurityGroup"))
       )
     | select(([.Resource] | flatten) | any(. == "*"))
   ] | length == 0
 ' "sensitive role-policy actions are never scoped to a wildcard resource"
 
+# --- Provider CRUD/read coverage and narrow scoping --------------------------
+
+# KMS CreateAlias and UpdateAlias authorize against both the alias and the
+# target key, so both resource types must be granted.
+assert_jq "${all_role_policies}" '
+  [ .Statement[]
+    | select(.Effect == "Allow")
+    | select(([.Action] | flatten) | index("kms:CreateAlias"))
+    | ([.Resource] | flatten)[]
+  ] as $r
+  | (($r | map(select(test(":alias/"))) | length > 0)
+     and ($r | map(select(test(":key/"))) | length > 0))
+' "kms:CreateAlias covers both the alias and the key"
+
+# The key-side CreateAlias/UpdateAlias grant stays constrained to the
+# benchmark Project tag.
+assert_jq "${all_role_policies}" '
+  [ .Statement[]
+    | select(.Effect == "Allow")
+    | select(([.Action] | flatten) | any(. == "kms:CreateAlias" or . == "kms:UpdateAlias"))
+    | select(([.Resource] | flatten) | any(test(":key/")))
+    | select(((.Condition // {})["StringEquals"]["aws:ResourceTag/Project"]) == "'"${sample_prefix}"'")
+  ] | length > 0
+' "kms alias writes on the key require the benchmark Project tag"
+
+# aws_kms_alias reads call ListAliases without a filter, which cannot be
+# resource-scoped.
+assert_jq "${all_role_policies}" '
+  [ .Statement[]
+    | select(.Effect == "Allow")
+    | select(([.Action] | flatten) | index("kms:ListAliases"))
+    | select(([.Resource] | flatten) | index("*"))
+  ] | length > 0
+' "kms:ListAliases is granted on the account-wide resource"
+
+# RDS tag reads are needed for the instance, parameter group, subnet group,
+# and snapshots.
+assert_jq "${all_role_policies}" '
+  [ .Statement[]
+    | select(.Effect == "Allow")
+    | select(([.Action] | flatten) | index("rds:ListTagsForResource"))
+    | ([.Resource] | flatten)[]
+  ] as $r
+  | (($r | map(select(test(":db:"))) | length > 0)
+     and ($r | map(select(test(":pg:"))) | length > 0)
+     and ($r | map(select(test(":subgrp:"))) | length > 0)
+     and ($r | map(select(test(":snapshot:"))) | length > 0))
+' "rds:ListTagsForResource covers instances, parameter groups, subnet groups, and snapshots"
+
+# S3 bucket read/config actions stay on the dedicated bucket only.
+assert_jq "${all_role_policies}" '
+  [ .Statement[]
+    | select(.Effect == "Allow")
+    | select(([.Action] | flatten) | any(. == "s3:GetBucketCORS"
+                                        or . == "s3:GetBucketWebsite"
+                                        or . == "s3:GetBucketObjectLockConfiguration"
+                                        or . == "s3:DeleteBucketLifecycle"
+                                        or . == "s3:GetReplicationConfiguration"
+                                        or . == "s3:GetAccelerateConfiguration"))
+    | ([.Resource] | flatten)[]
+    | select(test("^arn:aws:s3:::'"${sample_prefix}"'-testcases$") | not)
+  ] | length == 0
+' "S3 bucket read/config actions are scoped to the benchmark bucket"
+
+# ec2:CreateSecurityGroup authorizes against the VPC as well as the security
+# group, so the benchmark VPC ARN must be granted explicitly and not widened.
+assert_jq "${all_role_policies}" '
+  [ .Statement[]
+    | select(.Effect == "Allow")
+    | select(([.Action] | flatten) | index("ec2:CreateSecurityGroup"))
+    | ([.Resource] | flatten)[]
+  ] | index("arn:aws:ec2:'"${sample_region}"':'"${sample_account}"':vpc/'"${sample_vpc_id}"'") != null
+' "ec2:CreateSecurityGroup is scoped to the benchmark VPC ARN"
+
+assert_jq "${all_role_policies}" '
+  [ .Statement[]
+    | select(.Effect == "Allow")
+    | select(([.Action] | flatten) | index("ec2:CreateSecurityGroup"))
+    | ([.Resource] | flatten)[]
+    | select(. == "*" or test(":vpc/\\*$"))
+  ] | length == 0
+' "ec2:CreateSecurityGroup is not scoped to a wildcard VPC"
+
 rendered_text="$(cat "${all_role_policies}")"
 for needle in \
   "${sample_state_key}" \
   "${sample_lock_table}" \
   "${sample_source_snapshot_arn}" \
+  "${sample_vpc_id}" \
   "${sample_prefix}"; do
   if grep -Fq -- "${needle}" <<<"${rendered_text}"; then
     pass "role policies reference ${needle}"

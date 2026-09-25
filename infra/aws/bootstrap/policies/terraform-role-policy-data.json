@@ -53,7 +53,9 @@
         "rds:RemoveTagsFromResource",
         "rds:DescribeDBEngineVersions",
         "rds:DescribeOrderableDBInstanceOptions",
-        "rds:DescribeDBInstanceAutomatedBackups"
+        "rds:DescribeDBInstanceAutomatedBackups",
+        "rds:ListTagsForResource",
+        "rds:ResetDBParameterGroup"
       ],
       "Resource": [
         "arn:aws:rds:__REGION__:__ACCOUNT_ID__:db:__NAME_PREFIX__*",
@@ -79,6 +81,9 @@
       "Sid": "ManageBenchmarkKmsKeyTagged",
       "Effect": "Allow",
       "Action": [
+        "kms:CreateAlias",
+        "kms:UpdateAlias",
+        "kms:UpdateKeyDescription",
         "kms:DescribeKey",
         "kms:GetKeyPolicy",
         "kms:PutKeyPolicy",
@@ -117,12 +122,19 @@
       "Action": [
         "kms:CreateAlias",
         "kms:UpdateAlias",
-        "kms:DeleteAlias",
-        "kms:ListAliases"
+        "kms:DeleteAlias"
       ],
       "Resource": [
         "arn:aws:kms:__REGION__:__ACCOUNT_ID__:alias/__NAME_PREFIX__*"
       ]
+    },
+    {
+      "Sid": "ListKmsAliasesForProviderReads",
+      "Effect": "Allow",
+      "Action": [
+        "kms:ListAliases"
+      ],
+      "Resource": "*"
     },
     {
       "Sid": "ManageBenchmarkSecrets",

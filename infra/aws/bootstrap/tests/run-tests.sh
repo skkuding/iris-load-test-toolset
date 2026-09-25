@@ -20,6 +20,7 @@ export PATH="${fake_bin}:${PATH}"
 export FAKE_AWS_STATE_DIR="${tmp}/state"
 export FAKE_AWS_LOG="${tmp}/aws.log"
 export FAKE_AWS_ACCOUNT="219857217698"
+export IRIS_BENCHMARK_VPC_ID="vpc-0123456789abcdef0"
 export FAKE_ACCESS_KEY_SECRET="FakeSecretValue/ABC123"
 export AWS_SHARED_CREDENTIALS_FILE="${tmp}/credentials"
 export AWS_CONFIG_FILE="${tmp}/config"
@@ -79,6 +80,7 @@ count_log() { [ -f "${FAKE_AWS_LOG}" ] && grep -c -- "$1" "${FAKE_AWS_LOG}" || t
 run_out="$("${bootstrap}" --dry-run --account-id "${account}" 2>&1)"
 assert_contains "dry-run: no AWS calls" "${run_out}" "dry-run announces no AWS calls"
 assert_contains "deployer user  = ${deployer}" "${run_out}" "dry-run resolves the deployer user"
+assert_contains "vpc id         = ${IRIS_BENCHMARK_VPC_ID}" "${run_out}" "dry-run resolves the benchmark VPC"
 assert_eq "0" "$(count_log .)" "dry-run makes zero AWS calls"
 
 # --- First bootstrap run (no access key) -------------------------------------
@@ -139,6 +141,14 @@ done
 role_policy_doc="$(jq -c '[.[] | .Document]' "${FAKE_AWS_STATE_DIR}/policies.json")"
 assert_contains '"TerraformBackendStateObject"' "${role_policy_doc}" "state object statement present"
 assert_contains "${prefix}" "${role_policy_doc}" "policy is benchmark-prefix scoped"
+assert_contains '"s3:GetBucketCORS"' "${role_policy_doc}" "S3 bucket CORS read granted"
+assert_contains '"s3:GetBucketObjectLockConfiguration"' "${role_policy_doc}" "S3 object-lock read granted"
+assert_contains '"rds:ListTagsForResource"' "${role_policy_doc}" "RDS tag reads granted"
+assert_contains '"rds:ResetDBParameterGroup"' "${role_policy_doc}" "RDS parameter reset granted"
+assert_contains '"kms:CreateAlias"' "${role_policy_doc}" "KMS alias create granted"
+assert_contains '"kms:ListAliases"' "${role_policy_doc}" "KMS alias list granted"
+assert_contains '"ec2:CreateSecurityGroup"' "${role_policy_doc}" "EC2 security group create granted"
+assert_contains "${IRIS_BENCHMARK_VPC_ID}" "${role_policy_doc}" "EC2 security group is scoped to the configured VPC"
 if grep -Fq '"Action":["*"]' <<<"${role_policy_doc}" || grep -Fq '"Action": "*"' <<<"${role_policy_doc}"; then
   fail "role policy contains a wildcard action"
 else

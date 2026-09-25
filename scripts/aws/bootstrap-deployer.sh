@@ -55,6 +55,9 @@
 #                             terraform/vpc.tfstate).
 #   --lock-table NAME         Terraform state lock table (default:
 #                             terraform-state-lock).
+#   --vpc-id ID               VPC where the benchmark security group is created
+#                             (default: $IRIS_BENCHMARK_VPC_ID or
+#                             vpc-0aa77aaba41d75afe).
 #   --source-snapshot-arn ARN Explicit source RDS snapshot ARN
 #                             (default: $IRIS_BENCHMARK_SOURCE_SNAPSHOT_ARN).
 #   --create-access-key       Create a key and configure the local profile.
@@ -96,6 +99,7 @@ state_bucket="${IRIS_BENCHMARK_STATE_BUCKET:-codedang-tf-state}"
 state_key="${IRIS_BENCHMARK_STATE_KEY:-terraform/iris-benchmark.tfstate}"
 vpc_state_key="${IRIS_BENCHMARK_VPC_STATE_KEY:-terraform/vpc.tfstate}"
 lock_table="${IRIS_BENCHMARK_LOCK_TABLE:-terraform-state-lock}"
+vpc_id="${IRIS_BENCHMARK_VPC_ID:-vpc-0aa77aaba41d75afe}"
 source_snapshot_arn="${IRIS_BENCHMARK_SOURCE_SNAPSHOT_ARN:-arn:aws:rds:ap-northeast-2:219857217698:snapshot:rds:terraform-20250506182211604800000001-2026-09-24-16-05}"
 account_id=""
 create_access_key="false"
@@ -115,7 +119,7 @@ cleanup() {
 trap cleanup EXIT
 
 usage() {
-  sed -n '2,75p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,78p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 while [ $# -gt 0 ]; do
@@ -131,6 +135,7 @@ while [ $# -gt 0 ]; do
     --state-key) state_key="$2"; shift 2 ;;
     --vpc-state-key) vpc_state_key="$2"; shift 2 ;;
     --lock-table) lock_table="$2"; shift 2 ;;
+    --vpc-id) vpc_id="$2"; shift 2 ;;
     --source-snapshot-arn) source_snapshot_arn="$2"; shift 2 ;;
     --create-access-key) create_access_key="true"; shift ;;
     --rotate-access-key) rotate_access_key="true"; shift ;;
@@ -158,6 +163,7 @@ require_value "--state-bucket" "${state_bucket}"
 require_value "--state-key" "${state_key}"
 require_value "--vpc-state-key" "${vpc_state_key}"
 require_value "--lock-table" "${lock_table}"
+require_value "--vpc-id" "${vpc_id}"
 require_value "--source-snapshot-arn" "${source_snapshot_arn}"
 require_cmd jq
 
@@ -193,6 +199,7 @@ render_policy() {
   content="${content//__STATE_KEY__/${state_key}}"
   content="${content//__VPC_STATE_KEY__/${vpc_state_key}}"
   content="${content//__LOCK_TABLE__/${lock_table}}"
+  content="${content//__VPC_ID__/${vpc_id}}"
   content="${content//__SOURCE_SNAPSHOT_ARN__/${source_snapshot_arn}}"
   content="${content//__DEPLOYER_USER__/${deployer_user}}"
   content="${content//__TERRAFORM_ROLE__/${terraform_role}}"
@@ -244,6 +251,7 @@ if [ "${dry_run}" = "true" ]; then
   log "dry-run: state key      = ${state_key}"
   log "dry-run: vpc state key  = ${vpc_state_key}"
   log "dry-run: lock table     = ${lock_table}"
+  log "dry-run: vpc id         = ${vpc_id}"
   log "dry-run: source snapshot= ${source_snapshot_arn}"
   log "dry-run: create key     = ${create_access_key}"
   log "dry-run: rotate keys    = ${rotate_access_key}"

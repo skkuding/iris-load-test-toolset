@@ -77,6 +77,11 @@ Run it a second time to confirm idempotence. Each customer-managed policy update
 is guarded by a `PolicyDocumentHash` tag so an unchanged policy is not versioned
 again.
 
+`--vpc-id ID` (or `IRIS_BENCHMARK_VPC_ID`) sets the VPC whose ARN is allowed for
+`ec2:CreateSecurityGroup`, because EC2 authorizes that action against both the
+new security group and its VPC. The default is the Codedang VPC
+`vpc-0aa77aaba41d75afe`; override it if the benchmark VPC changes.
+
 ## Access key safety
 
 `--create-access-key` is required to create a key; the default run creates none.
@@ -121,7 +126,27 @@ These are known trade-offs in the granted policy. Review them before applying.
 - `kms:CreateKey` and the read-only `Describe*`/`List*` actions sit on
   `Resource: "*"` because IAM/KMS/EC2 describe APIs cannot be resource-scoped.
   `kms:CreateKey` is additionally constrained to requests tagged with
-  `Project = codedang-iris-benchmark`.
+  `Project = codedang-iris-benchmark`. `kms:ListAliases` is account-wide for the
+  same reason; it is a read-only list used by `aws_kms_alias` refresh.
+- `kms:CreateAlias`/`kms:UpdateAlias` are granted on both the alias ARN and the
+  benchmark key ARN, because KMS authorizes alias writes against both. The
+  key-side grant keeps the `aws:ResourceTag/Project` condition, so it only
+  applies while the benchmark key is tagged.
+- `rds:ListTagsForResource` is granted on the benchmark instance, parameter
+  group, subnet group, and snapshot ARNs for provider refresh. It is required in
+  addition to `rds:AddTagsToResource`/`rds:RemoveTagsFromResource`, which cover
+  only the write path.
+- `ec2:CreateSecurityGroup` is granted on the dedicated benchmark security group
+  ARN (tag-constrained) and on the single benchmark VPC ARN supplied by
+  `--vpc-id`. The VPC statement carries no tag condition because the shared VPC
+  is not tagged with the benchmark project, but the SG-side statement still
+  requires `Project = codedang-iris-benchmark` on the created group.
+- The S3 bucket statement includes the read/config APIs that `aws_s3_bucket`
+  refresh calls (`GetBucketCORS`, `GetBucketWebsite`, `GetBucketLogging`,
+  `GetBucketRequestPayment`, `GetAccelerateConfiguration`,
+  `GetReplicationConfiguration`, `GetBucketObjectLockConfiguration`) plus
+  `DeleteBucketLifecycle`/`DeleteBucketTagging`. All are scoped to the single
+  benchmark bucket ARN.
 - KMS key management is scoped to `key/*` with a `aws:ResourceTag/Project`
   condition. If a key is created without the tag, subsequent management calls
   fail; Terraform tags the key, so keep `common_tags` on the key.
