@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+#
+# Minimal fake AWS CLI for tests. It never contacts AWS. It records every
+# invocation to $FAKE_AWS_LOG, serves canned `rds describe-db-snapshots`
+# responses, simulates `s3api put-object`/`head-object`, and serves canned
+# Secrets Manager values.
+#
+# Environment:
+#   FAKE_AWS_LOG           required: path to append "%args" invocation log
+#   FAKE_SNAPSHOTS_FILE    JSON for `rds describe-db-snapshots`
+#   FAKE_S3_STATE_DIR      directory for simulated object state
+#   FAKE_MASTER_SECRET_FILE / FAKE_RO_SECRET_FILE
+#
+# Unexpected subcommands exit 42 so tests catch any read-only violation.
+set -euo pipefail
+
+[ -n "${FAKE_AWS_LOG:-}" ] || {
+  echo "fake-aws: FAKE_AWS_LOG not set" >&2
+  exit 2
+}
+printf '%s\n' "$*" >>"${FAKE_AWS_LOG}"
+
+cmd="${1:-} ${2:-}"
+if [ $# -ge 2 ]; then shift 2; else shift $#; fi
+
+case "${cmd}" in
+  "rds describe-db-snapshots")
+    cat "${FAKE_SNAPSHOTS_FILE:?}"
+    ;;
+  "s3api put-object")
+    bucket=""
+    key=""
+    body=""
+    metadata=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --bucket) bucket="$2"; shift 2 ;;
+        --key) key="$2"; shift 2 ;;
+        --body) body="$2"; shift 2 ;;
+        --metadata) metadata="$2"; shift 2 ;;
+        --content-type | --checksum-algorithm | --tagging | --region | --output) shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    [ -n "${key}" ] && [ -n "${body}" ] || {
+      echo "fake-aws: put-object missing --key/--body" >&2
+      exit 3
+    }
+    state="${FAKE_S3_STATE_DIR:?}"
+    slug="${key//\//_}"
+    printf '%s' "${metadata#sha256=}" >"${state}/${slug}.sha"
+    wc -c <"${body}" | tr -d '[:space:]' >"${state}/${slug}.size"
+    printf '{"VersionId":"test-version-1"}\n'
+    ;;
+  "s3api head-object")
+    key=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --key) key="$2"; shift 2 ;;
+        --bucket | --checksum-mode | --region | --output) shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    state="${FAKE_S3_STATE_DIR:?}"
+    slug="${key//\//_}"
+    if [ -f "${state}/${slug}.sha" ]; then
+      sha="$(cat "${state}/${slug}.sha")"
+      size="$(cat "${state}/${slug}.size")"
+      b64="$(python3 -c 'import base64,sys; sys.stdout.write(base64.b64encode(bytes.fromhex(sys.argv[1])).decode())' "${sha}")"
+      printf '{"ContentLength":%s,"ChecksumSHA256":"%s","VersionId":"test-version-1"}\n' "${size}" "${b64}"
+    else
+      printf '{}\n'
+    fi
+    ;;
+  "secretsmanager get-secret-value")
+    secret_id=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --secret-id) secret_id="$2"; shift 2 ;;
+        --region | --query | --output) shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    case "${secret_id}" in
+      *readonly*) cat "${FAKE_RO_SECRET_FILE:?}" ;;
+      *) cat "${FAKE_MASTER_SECRET_FILE:?}" ;;
+    esac
+    ;;
+  *)
+    echo "fake-aws: unexpected invocation: ${cmd} $*" >&2
+    exit 42
+    ;;
+esac

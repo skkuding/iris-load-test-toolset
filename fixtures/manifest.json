@@ -1,0 +1,120 @@
+{
+  "generator": "scripts/aws/build-fixture-manifest.sh",
+  "objects": [
+    {
+      "content_type": "text/plain",
+      "hidden": false,
+      "problem_id": "568",
+      "relative_path": "568/1.in",
+      "s3_key": "568/1.in",
+      "sha256": "f251ddc12234e0da8d3b778bd0f7463fb477f16f47757f5617dc8b4ff4d4f14a",
+      "size": 4
+    },
+    {
+      "content_type": "text/plain",
+      "hidden": false,
+      "problem_id": "568",
+      "relative_path": "568/1.out",
+      "s3_key": "568/1.out",
+      "sha256": "1121cfccd5913f0a63fec40a6ffd44ea64f9dc135c66634ba001d10bcf4302a2",
+      "size": 2
+    },
+    {
+      "content_type": "text/plain",
+      "hidden": false,
+      "problem_id": "568",
+      "relative_path": "568/2.in",
+      "s3_key": "568/2.in",
+      "sha256": "8b3a3ad9552da324931fb27537e3151951d3641d00b8fb322de4a2b0580d353d",
+      "size": 6
+    },
+    {
+      "content_type": "text/plain",
+      "hidden": false,
+      "problem_id": "568",
+      "relative_path": "568/2.out",
+      "s3_key": "568/2.out",
+      "sha256": "f4ccd05b3271c386ee55d9876c7450012a3b361e5065c09dc22075e38b3cc35c",
+      "size": 3
+    },
+    {
+      "content_type": "text/plain",
+      "hidden": false,
+      "problem_id": "569",
+      "relative_path": "569/1.in",
+      "s3_key": "569/1.in",
+      "sha256": "8b2400d87bdbae9842fb0f3af97842ee8245fb64129e1b0aa046a0b299267505",
+      "size": 4
+    },
+    {
+      "content_type": "text/plain",
+      "hidden": false,
+      "problem_id": "569",
+      "relative_path": "569/1.out",
+      "s3_key": "569/1.out",
+      "sha256": "53c234e5e8472b6ac51c1ae1cab3fe06fad053beb8ebfd8977b010655bfdd3c3",
+      "size": 2
+    },
+    {
+      "content_type": "text/plain",
+      "hidden": false,
+      "problem_id": "569",
+      "relative_path": "569/2.in",
+      "s3_key": "569/2.in",
+      "sha256": "7171c3a908e9f546c6ce10dea695238e7b8e4ee082d64085d65ffeed1fd385ff",
+      "size": 4
+    },
+    {
+      "content_type": "text/plain",
+      "hidden": false,
+      "problem_id": "569",
+      "relative_path": "569/2.out",
+      "s3_key": "569/2.out",
+      "sha256": "f0b5c2c2211c8d67ed15e75e656c7862d086e9245420892a7de62cd9ec582a06",
+      "size": 2
+    },
+    {
+      "content_type": "text/plain",
+      "hidden": false,
+      "problem_id": "570",
+      "relative_path": "570/1.in",
+      "s3_key": "570/1.in",
+      "sha256": "ce434a743148081fcb8cbbaf67ac1f09cbe2dcf9515fadb668d7a6e555825600",
+      "size": 4
+    },
+    {
+      "content_type": "text/plain",
+      "hidden": false,
+      "problem_id": "570",
+      "relative_path": "570/1.out",
+      "s3_key": "570/1.out",
+      "sha256": "a1fb50e6c86fae1679ef3351296fd6713411a08cf8dd1790a4fd05fae8688164",
+      "size": 3
+    },
+    {
+      "content_type": "text/plain",
+      "hidden": false,
+      "problem_id": "570",
+      "relative_path": "570/2.in",
+      "s3_key": "570/2.in",
+      "sha256": "cf06cdf1cdcda2f8e4b9a07b87a73de9b3e7c2dcce21589aac32225670abc33a",
+      "size": 4
+    },
+    {
+      "content_type": "text/plain",
+      "hidden": false,
+      "problem_id": "570",
+      "relative_path": "570/2.out",
+      "s3_key": "570/2.out",
+      "sha256": "084c799cd551dd1d8d5c5f9a5d593b2e931f5e36122ee5c793c1d08a19839cc0",
+      "size": 3
+    }
+  ],
+  "problems": [
+    "568",
+    "569",
+    "570"
+  ],
+  "schema_version": 1,
+  "source": "sanitized benchmark fixtures derived from the codedang-iris-benchmark RDS clone"
+}

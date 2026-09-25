@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+#
+# Minimal fake psql for tests. It never contacts a database. It records its
+# arguments, captures PGPASSWORD into a separate log (if configured), reads
+# stdin, and prints a canned NDJSON result file.
+#
+# Environment:
+#   FAKE_PSQL_ARGS_LOG      required: append "%args" invocation log
+#   FAKE_PSQL_OUTPUT_FILE   required: file printed to stdout
+#   FAKE_PSQL_PASSWORD_LOG  optional: file to write PGPASSWORD to (values only)
+#   FAKE_PSQL_STDIN_LOG     optional: file to append stdin to
+#   FAKE_PSQL_FAIL          optional: when "true", exit 1 without output
+set -euo pipefail
+
+if [ "${FAKE_PSQL_FAIL:-false}" = "true" ]; then
+  printf 'fake-psql: forced failure\n' >&2
+  exit 1
+fi
+
+printf '%s\n' "$*" >>"${FAKE_PSQL_ARGS_LOG:?}"
+if [ -n "${FAKE_PSQL_PASSWORD_LOG:-}" ]; then
+  printf '%s' "${PGPASSWORD:-}" >"${FAKE_PSQL_PASSWORD_LOG}"
+fi
+if [ -n "${FAKE_PSQL_STDIN_LOG:-}" ] && [ ! -t 0 ]; then
+  cat >>"${FAKE_PSQL_STDIN_LOG}"
+fi
+cat "${FAKE_PSQL_OUTPUT_FILE:?}"
