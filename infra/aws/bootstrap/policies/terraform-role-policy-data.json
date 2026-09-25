@@ -206,9 +206,11 @@
       ]
     },
     {
-      "Sid": "ReadRdsManagedMasterSecret",
+      "Sid": "CreateAndReadRdsManagedMasterSecret",
       "Effect": "Allow",
       "Action": [
+        "secretsmanager:CreateSecret",
+        "secretsmanager:TagResource",
         "secretsmanager:DescribeSecret",
         "secretsmanager:GetSecretValue"
       ],
