@@ -62,6 +62,9 @@
 #                             codedang-iris-benchmark).
 #   --host HOST               Override the secret host (must still match).
 #   --port PORT               Override the secret port.
+#   --connect-host HOST       Loopback transport endpoint after validating the
+#                             secret host (for an SSH tunnel).
+#   --connect-port PORT       Port for --connect-host.
 #   --dbname NAME             Override the secret database name.
 #   --problems "A B C"        Problem ids; must be exactly 568 569 570.
 #   --max-bytes N             Maximum bytes per fixture file (default: 8388608).
@@ -90,6 +93,8 @@ region="${IRIS_BENCHMARK_AWS_REGION:-ap-northeast-2}"
 identifier="${IRIS_BENCHMARK_RDS_IDENTIFIER:-${required_prefix}}"
 host_override=""
 port_override=""
+connect_host=""
+connect_port=""
 dbname_override=""
 psql_bin="psql"
 sql_file="${script_dir}/sql/export-problem-fixtures.sql"
@@ -103,7 +108,7 @@ force="false"
 dry_run="false"
 
 usage() {
-  sed -n '2,75p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,78p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 # Scratch directories created with mktemp that must be removed on any exit.
@@ -164,6 +169,14 @@ while [ $# -gt 0 ]; do
       ;;
     --port)
       port_override="$2"
+      shift 2
+      ;;
+    --connect-host)
+      connect_host="$2"
+      shift 2
+      ;;
+    --connect-port)
+      connect_port="$2"
       shift 2
       ;;
     --dbname)
@@ -406,6 +419,16 @@ run_extract() {
   [ -n "${dbname_override}" ] && dbname="${dbname_override}"
 
   require_benchmark_host "${host}"
+  if [ -n "${connect_host}" ]; then
+    case "${connect_host}" in
+      127.0.0.1 | localhost | ::1) ;;
+      *) die "--connect-host must be loopback" ;;
+    esac
+    host="${connect_host}"
+    [ -n "${connect_port}" ] && port="${connect_port}"
+  elif [ -n "${connect_port}" ]; then
+    die "--connect-port requires --connect-host"
+  fi
   require_value "database port" "${port}"
   require_value "database name" "${dbname}"
 

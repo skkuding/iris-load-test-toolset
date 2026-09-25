@@ -196,6 +196,17 @@ assert_eq "0" "$(grep -c . "${FAKE_PSQL_ARGS_LOG}" || true)" "refused host makes
 export FAKE_RO_SECRET_FILE="${saved_ro}"
 
 : >"${FAKE_PSQL_ARGS_LOG}"
+capture "${export_script}" --out "${tmp}/tunneled" --connect-host 127.0.0.1 \
+  --connect-port 15433 --psql "${fake_psql}"
+assert_eq "0" "${STATUS}" "extract accepts an explicit loopback tunnel endpoint"
+assert_contains "-h 127.0.0.1 -p 15433" "$(cat "${FAKE_PSQL_ARGS_LOG}")" \
+  "psql uses the loopback tunnel after validating the benchmark host"
+
+capture "${export_script}" --out "${tmp}/refuse_connect_host" \
+  --connect-host attacker.example --psql "${fake_psql}"
+if [ "${STATUS}" -ne 0 ]; then pass "extract refuses a non-loopback connect host"; else fail "extract accepted a non-loopback connect host"; fi
+
+: >"${FAKE_PSQL_ARGS_LOG}"
 capture "${export_script}" --out "${tmp}/refuse_host_override" --host "prod-cluster.example.internal" --psql "${fake_psql}"
 if [ "${STATUS}" -ne 0 ]; then pass "extract refuses a non-benchmark host override"; else fail "extract accepted a non-benchmark host override"; fi
 assert_eq "0" "$(grep -c . "${FAKE_PSQL_ARGS_LOG}" || true)" "refused host override makes no psql call"
