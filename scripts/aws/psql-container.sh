@@ -11,4 +11,6 @@ command -v "${runtime}" >/dev/null 2>&1 || {
 
 exec "${runtime}" run --rm --network host -i \
   -e PGPASSWORD \
+  -v "${PWD}:${PWD}:ro" \
+  -w "${PWD}" \
   "${image}" psql "$@"
