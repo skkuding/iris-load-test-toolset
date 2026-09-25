@@ -1,0 +1,146 @@
+{
+  "generator": "scripts/aws/export-problem-fixtures.sh",
+  "objects": [
+    {
+      "content_type": "text/plain",
+      "hidden": false,
+      "problem_id": "568",
+      "relative_path": "568/15850.in",
+      "s3_key": "568/15850.in",
+      "sha256": "3e725578374c88418d6753d0bdb3342e17f72baddb5193755a86e3c09e25ff5b",
+      "size": 8
+    },
+    {
+      "content_type": "text/plain",
+      "hidden": false,
+      "problem_id": "568",
+      "relative_path": "568/15850.out",
+      "s3_key": "568/15850.out",
+      "sha256": "d59c6c8dc5dffd57ffbb799361589eeb6bf4174130bfc2371d71e76e913e13cb",
+      "size": 10
+    },
+    {
+      "content_type": "text/plain",
+      "hidden": false,
+      "problem_id": "569",
+      "relative_path": "569/15852.in",
+      "s3_key": "569/15852.in",
+      "sha256": "3d497c58c13acabd5365e20ce4d8ed129160e93973c72af2532a5a72c1ebc366",
+      "size": 106
+    },
+    {
+      "content_type": "text/plain",
+      "hidden": false,
+      "problem_id": "569",
+      "relative_path": "569/15852.out",
+      "s3_key": "569/15852.out",
+      "sha256": "e79fdd46e760b800106ca5f1df7b8083768f1044a921677bbce7b1a08be9224e",
+      "size": 15
+    },
+    {
+      "content_type": "text/plain",
+      "hidden": false,
+      "problem_id": "570",
+      "relative_path": "570/15873.in",
+      "s3_key": "570/15873.in",
+      "sha256": "2e96c35387d96292e199105b8da195022c5482dcc6a1cb2a976c8b46469a29bb",
+      "size": 22
+    },
+    {
+      "content_type": "text/plain",
+      "hidden": false,
+      "problem_id": "570",
+      "relative_path": "570/15873.out",
+      "s3_key": "570/15873.out",
+      "sha256": "68b80d6619619255a4d004d54476de51f9157acd0a9d97cd294a0a3862cad3dd",
+      "size": 4
+    }
+  ],
+  "problem_specs": [
+    {
+      "description": "<p>Define an “arrow string” as a string that meets the following conditions:\\n\\n• The length of the string is at least 5.\\n• The string starts with &gt; and ends with &gt;&gt;&gt;.\\n• The rest of the string consists only of -.\\n\\nFor example, &gt;--&gt;&gt;&gt; and &gt;---&gt;&gt;&gt; are valid arrow strings, while &gt;-&gt;&gt; and &gt;-&gt;-&gt;&gt;&gt; are not.\\n\\nSauden gives you a string s of length n, consisting of &gt; and -. You need to create s by performing a series of painting operations on a string of the same length n that consists entirely of *. In one painting operation, you can choose a substring of length at least 5 and transform it into an arrow string. The total number of operations you perform cannot exceed n.\\n\\nIf it is impossible to obtain the string s using no more than n painting operations, output No. Otherwise, output Yes and provide the details of the painting operations. If there are multiple solutions, output any.</p>",
+      "difficulty": "Level3",
+      "eng_description": null,
+      "eng_hint": null,
+      "eng_input_description": null,
+      "eng_output_description": null,
+      "eng_title": null,
+      "hint": "",
+      "id": 568,
+      "input_description": "<p>The first line contains a single integer T (1 ≤ T ≤ 10^4), indicating the number of test cases.\\nEach test case contains a string s of length n (5 ≤ n ≤ 10^5) in a single line, consisting only of &gt; and -.\\nIt is guaranteed that the sum of n over all test cases does not exceed 5 * 10^5.</p>",
+      "memory_limit_mb": 1024,
+      "output_description": "<p>For each test case, if the given string cannot be obtained by performing no more than n painting operations, output No in a single line. Otherwise, output Yes and a positive integer m (1 ≤ m ≤ n), which denotes the number of painting operations to perform. Then output m lines, each contains two integers p (1 ≤ p ≤ n-4) and l (5 ≤ l ≤ n+1-p), indicating the starting position of the selected substring and its length.</p>",
+      "source": "The 2024 ICPC Asia Chengdu Regional Contest",
+      "time_limit_ms": 1000,
+      "title": "Arrow a Row"
+    },
+    {
+      "description": "<p>In Pigeland, there are $n$ universities, numbered from 1 to $n$. Each year, several ranking organizations publish rankings of these universities. This year, there are $k$ ranking lists, where each list is a permutation of integers from 1 to $n$, representing the universities. In each ranking, the closer a university is to the beginning of the permutation, the better its ranking is in this list.\\n\\nA true story in the 2024 ICPC World Final.\\n\\nSupigar, a year-4 student who wants to apply for PhD programs in Pigeland, has his own method to evaluate the $n$ universities comprehensively. He considers that university $x$ is superior to another university $y$ if and only if:\\n\\n• $x$ is ranked better than $y$ in at least one list, or\\n• $x$ is ranked better than $z$ ($z \\\\neq x, z \\\\neq y$) in at least one list, and $z$ is superior to $y$.\\n\\nClearly, under this definition, there might exist some pairs of universities $x$ and $y$ ($x &lt; y$) such that $x$ is superior to $y$ while $y$ is also superior to $x$. Supigar calls such pairs fuzzy.\\n\\nSupigar has $q$ queries, where the $i$-th query can be represented by three integers $id_i$, $l_i$ and $r_i$ $[l_i \\\\leq r_i]$. For each query, he will consider the $id_i$-th rank list and all the universities between the $l_i$-th position and the $r_i$-th position (both inclusive) in that list. He wants to know, among these universities, how many pairs of them are fuzzy. Note that the definition of fuzzy pairs requires considering the superior relationships among all $k$ rank lists.</p>",
+      "difficulty": "Level3",
+      "eng_description": null,
+      "eng_hint": null,
+      "eng_input_description": null,
+      "eng_output_description": null,
+      "eng_title": null,
+      "hint": "",
+      "id": 569,
+      "input_description": "<p>There are multiple test cases. The first line of the input contains an integer $T$ ($1 \\\\le T \\\\le 2 \\\\times 10^5$) indicating the number of test cases. For each test case:\\n\\nThe first line contains three integers $n$, $k$, and $q$ ($1 \\\\leq n, k, q \\\\leq 2 \\\\times 10^5$, $1 \\\\leq n \\\\times k \\\\leq 2 \\\\times 10^{b}$) indicating the number of universities, rank lists, and queries, respectively.\\n\\nFor the following $k$ lines, the $i$-th line contains $n$ distinct integers $a_{i,1}, a_{i,2}, \\\\dots, a_{i,n}$ ($1 \\\\leq a_{i,j} \\\\leq n$), indicating the $i$-th rank list.\\n\\nFor the following $q$ lines, the $i$-th line contains three integers $id_i'$, $l_i'$, and $r_i'$ ($0 \\\\leq id_i' &lt; k$, $0 \\\\leq l_i', r_i' &lt; n$) indicating the encoded index of the rank list and the query range for the $i$-th query.\\n\\n• The real value of $id_i$ is equal to $((id_i' + v_{i-1}) \\\\mathrm{mod} k) + 1$.\\n• The real value of $l_i$ is equal to $((l_i' + v_{i-1}) \\\\mathrm{mod} n) + 1$.\\n• The real value of $r_i$ is equal to $((r_i' + v_{i-1}) \\\\mathrm{mod} n) + 1$.\\n\\nWhere $v_{i-1}$ is the answer for the $(i-1)$-th query. Specifically, we define $v_0 = 0$. With the encoded queries, you’re forced to calculate the answer to each query before processing the next one. It’s guaranteed that $1 \\\\leq id_i \\\\leq k$ and $1 \\\\leq l_i \\\\leq r_i \\\\leq n$ after decoding.\\n\\nIt is also guaranteed that neither the sum of $n \\\\times k$ nor the sum of $q$ of all test cases will exceed $2 \\\\times 10^5$.</p>",
+      "memory_limit_mb": 1024,
+      "output_description": "<p>For each test case output $q$ lines. Each line contains a single integer representing the number of fuzzy pairs as the answer to the $i$-th query.</p>",
+      "source": "The 2024 ICPC Asia Hangzhou Regional Contest",
+      "time_limit_ms": 2000,
+      "title": "Fuzzy Ranking"
+    },
+    {
+      "description": "<p>Pig100ton has a tree $T_{1}$ with $n$ vertices and an array $a$ of length $n$ whose elements are initially equal to 0. He can construct a new tree $T_{2}$ from $T_{1}$ by performing the following operations for $n$ times:\\n\\n• Choose an arbitrary vertex $x$ that is not deleted in $T_{1}$. Let its father in $T_{2}$ be $a_{x}$ (if $a_{x}=0$, then let $x$ be the root of $T_{2}$).\\n• For all vertices $y$ that can be reached from $x$ by edges in $T_{1}$, assign $x$ to $a_{y}$.\\n• Delete vertex $x$ and the edges adjacent to $x$ in $T_{1}$.\\n\\nPig100ton has another tree $T$ of $n$ vertices. For each $1\\\\leq u\\\\leq n$, he wants to know whether $T$ is a possible tree that can be constructed by him from $T_{1}$ if $T$ is rooted at vertex $u$. Please help him find the answers.</p>",
+      "difficulty": "Level1",
+      "eng_description": null,
+      "eng_hint": null,
+      "eng_input_description": null,
+      "eng_output_description": null,
+      "eng_title": null,
+      "hint": "",
+      "id": 570,
+      "input_description": "<p>The first line contains a single integer $n$ ($1\\\\leq n\\\\leq5\\\\cdot10^{5}$), denoting the number of vertices in the tree $T_{1}$. Each of the next $n-1$ lines contains two integers $u$ and $\\\\upsilon$ ($1\\\\leq u,v\\\\leq n,u\\\\neq v,$), representing an undirected edge from $u$ to $\\\\upsilon$ in $T_{1}$. It is guaranteed that the given edges form a tree.\\n\\nEach of the next $n-1$ lines contains two integers $u$ and $\\\\upsilon$ ($1\\\\leq u,v\\\\leq n,u\\\\neq v$), representing an undirected edge from $u$ to $v$ in $T$. It is guaranteed that the given edges form a tree.</p>",
+      "memory_limit_mb": 1024,
+      "output_description": "<p>Output a string of length $n$ in a single line. The $i$-th character is $1$ if $T$ is a possible tree that can be constructed by him from $T_{1}$ when $T$ is rooted at vertex $i$, or $0$ otherwise.</p>",
+      "source": "The 2024 ICPC Asia Hong Kong Regional Contest",
+      "time_limit_ms": 3000,
+      "title": "Reconstruction"
+    }
+  ],
+  "problems": [
+    "568",
+    "569",
+    "570"
+  ],
+  "schema_version": 1,
+  "skipped_testcases": [],
+  "source": "sanitized benchmark fixtures derived from cloned problem specifications and public samples",
+  "testcases": [
+    {
+      "hidden": false,
+      "is_outdated": false,
+      "order": 19,
+      "problem_id": "568",
+      "score_weight": 5,
+      "testcase_id": 15850
+    },
+    {
+      "hidden": false,
+      "is_outdated": false,
+      "order": 1,
+      "problem_id": "569",
+      "score_weight": 5,
+      "testcase_id": 15852
+    },
+    {
+      "hidden": false,
+      "is_outdated": false,
+      "order": 1,
+      "problem_id": "570",
+      "score_weight": 5,
+      "testcase_id": 15873
+    }
+  ]
+}

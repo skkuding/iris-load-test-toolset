@@ -24,6 +24,7 @@ SELECT json_build_object(
   'kind', 'problem',
   'id', p.id,
   'title', p.title,
+  'description', p.description,
   'input_description', p.input_description,
   'output_description', p.output_description,
   'hint', p.hint,

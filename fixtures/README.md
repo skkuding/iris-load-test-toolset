@@ -12,9 +12,10 @@ fixtures/
 ├── manifest.json          # pins the exact object set, sizes, and SHA-256
 ├── schema/
 │   └── manifest.schema.json
-├── 568/1.in, 1.out, ...
-├── 569/...
-├── 570/...
+├── metadata.json          # sanitized problem specifications and testcase IDs
+├── 568/15850.in, 15850.out
+├── 569/15852.in, 15852.out
+├── 570/15873.in, 15873.out
 └── tests/verify-fixtures.sh
 ```
 
@@ -24,11 +25,13 @@ The layout mirrors how Iris reads testcases from S3
 
 ## Sanitization and provenance
 
-The committed fixtures are synthetic, license-compatible, and contain no
-production data, credentials, or personal information. They are placeholders
-for the per-problem shape; the approved plan requires deriving the final
-sanitized content and hidden flags from the cloned benchmark database. Replace
-the assets, then regenerate the manifest:
+Problem specifications and testcase IDs were exported read-only from the
+dedicated RDS clone. Problems 569 and 570 use their public sample rows. Problem
+568 had no usable inline sample data, so `15850` contains a small testcase
+derived from the cloned specification. Hidden production testcases are not
+committed. All six files are uploaded unchanged with `hidden=false`.
+
+Regenerate the manifest after an intentional fixture change:
 
 ```bash
 ../scripts/aws/build-fixture-manifest.sh --write
