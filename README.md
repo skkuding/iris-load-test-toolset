@@ -14,8 +14,7 @@ This repository currently implements the **direct Judger foundation**:
 - a controller, `iris-benchctl`, and a host agent, `iris-bench-agent`;
 - a checksum-pinned direct runner, `judger-bench`, and its image.
 
-The full-Iris/AMQP suite, controller-side agent staging, topology
-auto-assignment, and privileged real-host validation are **not** implemented in
+The full-Iris/AMQP suite, topology auto-assignment, and privileged real-host validation are **not** implemented in
 this build. See [Not supported in this build](#not-supported-in-this-build).
 
 ## Safety boundary
@@ -33,11 +32,13 @@ this build. See [Not supported in this build](#not-supported-in-this-build).
 ## Layout
 
 ```text
-cmd/iris-benchctl/          controller CLI (plan, run, collect, status)
+cmd/iris-benchctl/          controller CLI (plan, run, collect, status, analyze)
 cmd/iris-bench-agent/       host agent and worker-exec wrapper
 cmd/judger-bench/           direct compile/execute loop and NDJSON samples
 internal/                   config, runplan, orchestrator, protocol, transport,
-                            containment, experiment, artifact, manifest
+                            containment, experiment, artifact, manifest,
+                            analyze, telemetry, qualification
+analysis/plot-run.py        uv-runnable plot of a collected direct run
 config/
   compatibility.yaml        host compatibility envelope (single source of truth)
   profiles.json             example controller config with profiles
@@ -90,15 +91,17 @@ iris-benchctl plan    --config FILE --host ALIAS --profile NAME [flags]
 iris-benchctl run     --config FILE --host ALIAS --profile NAME [flags]
 iris-benchctl collect --config FILE --host ALIAS --run RUNID [flags]
 iris-benchctl status  --config FILE --run RUNID [--host ALIAS]
+iris-benchctl analyze --run RUN_DIRECTORY
 ```
 
 | Command | State | Behavior |
 | --- | --- | --- |
 | `plan` | Implemented | Resolves and prints the immutable run plan JSON (stdout) and its SHA-256 (stderr). No mutation. |
-| `run` | Implemented | `inspect` -> upload plan -> `prepare` -> every `run-block` -> `validate` -> `bundle` -> `cleanup`, forwarding the required direct-suite flags. Requires a pre-staged agent; does not `collect` (run `collect` afterward). |
-| `collect` | Implemented | Downloads and hash-verifies a bundle inventory into `runs/<run-id>`, secret-scans it, and writes `manifest.json`, `checksums.sha256`, `collection.json`, and `COMPLETE`. |
+| `run` | Implemented | Stages sealed direct-suite assets, then runs `inspect` -> `prepare`/qualification -> every `run-block` -> `validate` -> `cleanup` -> `bundle`. Does not `collect` (run `collect` afterward). |
+| `collect` | Implemented | Downloads and hash-verifies a bundle inventory, requires qualification/validation/cleanup evidence, secret-scans it, and writes `manifest.json`, `checksums.sha256`, `collection.json`, and `COMPLETE`. |
 | `status` | Implemented | Prints local persisted state, or queries the remote agent with `--host`. |
-| `provision`, `qualify`, `analyze`, `resume` | Not implemented | Print `not implemented in the minimum viable core` and exit non-zero. |
+| `analyze` | Implemented (direct suite) | Aggregates collected `samples/*.ndjson` in lexical order and prints timing statistics plus a telemetry-backed comparability decision as JSON. |
+| `provision`, `qualify`, `resume` | Not implemented | Print `not implemented in the minimum viable core` and exit non-zero. |
 
 `plan` and `run` share the plan flags:
 
@@ -112,8 +115,15 @@ iris-benchctl status  --config FILE --run RUNID [--host ALIAS]
 -resolve-image          resolve the configured Iris tag with docker buildx imagetools
 -judger-digest DIGEST   Judger artifact SHA-256 (raw hex or sha256:...)
 -judger-digest-file F   use the SHA-256 of file F as the Judger digest
+-benchmark-image ID     immutable local Docker image ID (exactly sha256:<64hex>)
 -seed N                 run random seed (default 1)
--fixture name=path      checksummed fixture input (repeatable)
+-fixture name=path      checksummed fixture input
+-expected-output name=path
+                        checksummed expected stdout paired by fixture name
+-bench-binary PATH      REMOTE precompiled workload binary
+-bench-binary-sha256 H  SHA-256 of the REMOTE workload binary
+-production-compat      accept stock alpha.4 root /sandbox-* behavior as an
+                        uncontained, non-comparable population
 ```
 
 `run` additionally accepts the direct-suite flags listed in the `run` section
@@ -127,41 +137,112 @@ go run ./cmd/iris-benchctl plan \
   --host codedang8 \
   --profile isolated-1s \
   --iris-digest sha256:<resolved-manifest-digest> \
-  --judger-digest 2c9a4da817e06f49daabe6b437f81d10f78b42be517d2e345ab4f868a4189103
+  --judger-digest 2c9a4da817e06f49daabe6b437f81d10f78b42be517d2e345ab4f868a4189103 \
+  --bench-binary /opt/iris-bench/bin/judger-bench \
+  --bench-binary-sha256 <workload-sha256>
 ```
 
-The plan refuses to seal without a resolved Iris digest and a Judger digest
-(`ValidateRunnable`). The same inputs always produce the same plan digest.
+The plan refuses to seal without a resolved Iris digest, a Judger digest, and a
+precompiled workload path and SHA-256 (`ValidateRunnable`). The same inputs
+always produce the same plan digest.
 
 ### run
 
-`run` initializes local state under `runs/.state/<run-id>/state.json`, uploads
-the sealed plan to `/tmp/iris-bench-<run-id>.plan.json`, then drives the agent
+`run` initializes local state under `runs/.state/<run-id>/state.json`, creates a
+private mode-`0700` remote directory `/tmp/iris-bench-<run-id>/`, uploads the
+sealed plan and local assets beneath it, then drives the agent
 through `inspect` -> `prepare` -> one `run-block` per plan block -> `validate` ->
-`bundle` -> `cleanup`. `cleanup` removes only the agent runtime directory, so the
+`cleanup` -> `bundle`. `cleanup` removes only the agent runtime directory, so the
 evidence preserved under `/var/lib/iris-bench/<run-id>` stays available to
 `collect`. `--dry-run` prints the resolved plan summary and stops before any SSH
 call. `--yes` is accepted but currently has no effect: `run` does not prompt.
 
-A direct-suite `run` forwards the flags `run-block` needs to every agent
-invocation (in addition to `--plan-file`):
+A direct-suite `run` accepts these remote execution flags:
 
 ```text
 -cgroup-parent PATH      delegated cgroup v2 subtree (required by run-block)
 -cgroup-mount PATH       cgroup v2 unified mount (agent default /sys/fs/cgroup)
--bench-binary PATH       precompiled direct-suite worker binary
+-bench-binary PATH       REMOTE precompiled workload binary (requires its SHA)
+-bench-binary-sha256 HEX SHA-256 of the REMOTE workload binary
+-agent PATH              REMOTE agent path override
 -judger PATH             external alpha.4 Judger binary
 -judger-sha256 HEX       Judger digest; must agree with the sealed plan
 -container-id ID         base CONTAINER_ID (per-worker suffix appended)
 -worker-timeout DUR      per-worker outer timeout
 ```
 
-Without `--cgroup-parent`, or without a worker binary (`--bench-binary`, or an
-agent `--worker-arg` template reachable only by invoking the agent directly),
-`run-block` returns an `unsupported` terminal result and the run stops. There is
-still no controller command that installs the agent; it must already exist at
-`/opt/iris-bench/bin/<toolVersion>/iris-bench-agent` (override with `--agent`),
-which is why controller-side agent staging is listed as unsupported below.
+Alternatively, `--local-bench-binary LOCAL` hashes and uploads a precompiled
+workload to its sealed run-directory path, and `--local-agent LOCAL` uploads the
+agent used for this run. Local and remote forms are mutually exclusive. The
+agent upload is re-hashed remotely before its first execution, and the private
+staging directory is removed after every success or failure path. The agent
+requires its compiled version to equal the plan tool version and verifies the
+sealed workload SHA-256 immediately before execution. Arbitrary source is never
+compiled. Without `--cgroup-parent`, `run-block` remains unsupported.
+
+Direct runs require exactly one `--fixture name=input` and matching
+`--expected-output name=output`. Both files are hashed into the sealed plan and
+uploaded to deterministic files beneath the private run-scoped staging
+directory recorded in that plan. The
+agent re-hashes both before launch, supplies the input to Judger, and requires
+every output to match the expected-output SHA-256.
+
+`--qualification-report LOCAL` similarly hashes and stages the sanitized
+Ansible report. Inspect copies it to `qualification/ansible-report.json`, and
+prepare accepts it only when `schema` is `iris-benchmark-qualification/v1`,
+`compatible=true`, `verification.failures` is empty, and `inventory_hostname`
+or `nodename` matches the sealed host identity. A run without this optional
+report still executes and can be collected, but its manifest and `COMPLETE`
+record are explicitly non-comparable. Comparable acceptance therefore fails
+closed. Production compatibility remains accepted and non-comparable.
+
+The default mode is `isolated`: samples must remain beneath their delegated
+worker subtree. Host execution remains available in this mode. Supplying
+`--benchmark-image sha256:<64hex>` selects OCI workers and seals that exact
+local Docker image ID as both `images["judger-bench"].reference` and `.digest`.
+The controller forwards the ID and the agent refuses any mismatch. Each worker
+uses an argv-only `docker run --rm` invocation with a unique run-scoped name,
+privileged host cgroup namespace access, its assigned CPU/NUMA set, and
+same-path mounts for cgroup v2, the sealed workload/fixtures, and output.
+
+`--production-compat` requires this OCI mode; unprivileged host execution cannot
+claim to reproduce the production root-cgroup behavior. The live alpha.4 Judger
+reports `cgroup_path` as a full filesystem path such as
+`/sys/fs/cgroup/sandbox-<CONTAINER_ID>/box-*`, while the monitor holds the
+mount-relative root `/sandbox-<CONTAINER_ID>`; both forms are normalized and
+accepted as the exact run-scoped root or one of its descendants, and prefix
+confusion such as `/sandbox-<CONTAINER_ID>-evil` is rejected. Those samples
+record `cgroupContained=false`; the manifest records an override and
+`comparable=false`. This is an accepted diagnostic population, never comparable
+to isolated runs. Live alpha.4 leaves one empty `box-*` child cgroup under the
+run-scoped root per iteration, so a leftover root can carry several of them. Its
+residue is still safely removed: after every worker exits, the agent removes the
+root and its empty `box-<safe-id>` children only through a tightly validated
+path. The root and every child must have an empty `cgroup.procs`, each child must
+have no grandchild cgroup, and no unexpected directory name may remain.
+Validation returns the canonical full filesystem paths children-first,
+root-last; any member process, deeper child, or unexpected child leaves every
+cgroup in place and fails the block with receipt evidence, and root absence is
+verified afterwards.
+
+The stock alpha.4 root and its boxes are root-owned, so an unprivileged manager
+can inspect but not `rmdir` them. In OCI mode the agent therefore injects a
+cleanup callback into the block coordinator: it first runs the read-only
+containment validation above to obtain the ordered canonical full filesystem
+paths, then removes them with a single argv-only helper container
+
+```text
+docker run --rm --privileged --cgroupns=host --entrypoint /bin/rmdir \
+  --mount type=bind,src=<cgroup-mount>,dst=<cgroup-mount> \
+  <sealed-image-id> <child-canonical-path>... <root-canonical-path>
+```
+
+using only the sealed image ID and no shell. `rmdir` accepts every validated path
+in one child-first, root-last invocation. The helper carries a run-scoped,
+validated container name plus the `iris-bench.run`/`iris-bench.block` labels, so
+a helper left behind by an interrupted run is caught by the same residual OCI
+container cleanup as the workers. Host mode removes the validated paths directly
+through the manager in the same order.
 
 ### collect
 
@@ -175,11 +256,15 @@ go run ./cmd/iris-benchctl collect \
 every listed file into a temporary directory. It re-verifies every size and
 SHA-256, scans the collected text for credential-shaped values and private key
 material, rebuilds `manifest.json` from the collected plan, and writes
-`checksums.sha256` and `collection.json`. It writes the `COMPLETE` marker only
-after those checks pass, then atomically renames the directory to
+`checksums.sha256` and `collection.json`. `checksums.sha256` covers every
+regular file in the published bundle, including `COMPLETE`, except itself to
+avoid a recursive checksum. Matching `qualified.json`,
+`validated.json`, and `cleaned.json` records for the sealed plan are mandatory.
+It writes the `COMPLETE` marker only after those checks pass, then atomically renames the directory to
 `runs/<run-id>`. An existing result directory is never overwritten. The
-inventory is produced by the agent `bundle` verb, which `run` invokes before
-`cleanup`.
+inventory is produced by the agent `bundle` verb after `cleanup`, so the cleanup
+record is included. Re-running `bundle` removes the old inventory before
+rebuilding it.
 
 ### status
 
@@ -190,6 +275,67 @@ go run ./cmd/iris-benchctl status --config config/profiles.json --run <run-id> -
 
 Without `--host` it prints the local `state.json`. With `--host` it asks the
 agent for the run's prepared state.
+
+### analyze
+
+```bash
+go run ./cmd/iris-benchctl analyze --run runs/<run-id>
+```
+
+The direct-suite analyzer parses `plan.json`, requires the sample and telemetry
+file for exactly every planned block, aggregates those samples, and emits JSON with the total count,
+failures, successful count, median, MAD, sample standard deviation,
+CV percentage, linearly interpolated p90/p95/p99, max, and p99/median for
+`cpuTimeMs` and `realTimeMs`. Failed samples contribute to the failure count but
+not the timing distributions. A successful sample with absent or invalid timing
+fields makes analysis fail rather than silently introducing a zero.
+
+The report is comparable only when the bundle has a valid comparable manifest,
+a `COMPLETE` marker, non-empty `qualification/host-facts.json`, and valid thermal
+evidence in `telemetry/thermal-<block-id>.ndjson` for every planned block. The
+agent captures sysfs thermal-zone temperatures and/or CPU thermal throttle
+counters immediately before and after each coordinator run. Each file contains
+exactly a `before` and `after` record with the block identity, positive
+`monotonicNs`, and concrete source maps, for example:
+
+```json
+{"schemaVersion":1,"blockId":"isolated-1s-01","phase":"before","monotonicNs":123456789,"temperaturesMilliC":{"sys/class/thermal/thermal_zone0/temp":42000}}
+```
+
+The agent fails closed when neither supported sysfs source is available and
+validation rejects missing or malformed block telemetry. A throttle-counter
+increase is retained as accepted evidence but marks collection non-comparable.
+The analyzer does not hide existing measurements when evidence is missing: it
+reports statistics with `comparable=false` and machine-readable reasons.
+
+### plot
+
+```bash
+uv run analysis/plot-run.py --run runs/<run-id>
+```
+
+`analysis/plot-run.py` turns an already-collected bundle into a two-panel figure
+(per-sample timings and distributions) and prints the same summary table. It is
+a standalone Python script with PEP 723 inline dependencies, so `uv run` creates
+the environment; no manual install is required. The plot is written outside the
+bundle (default `<run-id>-timeseries.png`) to preserve bundle immutability and
+checksums; override with `--out` and `--format png|svg|pdf`.
+
+### plot-ladder
+
+```bash
+uv run analysis/plot-ladder.py \
+  --run 1=runs/<run-1> --run 2=runs/<run-2> --run 4=runs/<run-4> \
+  --run 8=runs/<run-8> --run 16=runs/<run-16> --run 30=runs/<run-30> \
+  --out wave1-direct-sweep.png
+```
+
+`plot-ladder.py` builds a three-panel boxplot (CPU time, real time, memory) by
+concurrency level, matching the layout of the Wave 1 report. Each `--run` pairs
+a label with a collected bundle; labels become the x-axis categories in the
+given order. `config/wave1-sweep.json` provides `ladder-1` … `ladder-30`
+profiles for such a sweep. [Wave 1 comparison](docs/WAVE1-COMPARISON.md) records
+the original reference values and the matched reproduction.
 
 ## Configuration
 
@@ -212,7 +358,7 @@ values. Example files: `config/profiles.json` and `config/run.example.json`.
       "turbo": "off"           // on | off
     }
   },
-  "hosts": [ { "alias": "codedang8", "hostIdentity": "server8", "allow": true } ],
+  "hosts": [ { "alias": "codedang8", "hostIdentity": "skkuding-4f-4", "allow": true } ],
   "paths": {
     "varRoot": "/var/lib/iris-bench",
     "runRoot": "/run/iris-bench",
@@ -224,6 +370,7 @@ values. Example files: `config/profiles.json` and `config/run.example.json`.
   "limits": {
     "maxWorkers": 32,
     "maxRunSeconds": 3600,
+    "maxLoad1": 1.0,
     "maxQueueDepth": 100000,
     "maxDiskMiB": 40960,
     "stopOnErrorRatePct": 0
@@ -232,6 +379,9 @@ values. Example files: `config/profiles.json` and `config/run.example.json`.
 ```
 
 At least one host must have `"allow": true`, and the `--host` alias must match.
+`limits.maxLoad1` defaults to the conservative value `1.0`, must be positive,
+and is sealed into `qualification.maxLoad1`; prepare rejects a missing,
+malformed, or higher one-minute host load.
 Note: the config accepts `suite: "iris"` and a `turbo` value, but the agent
 refuses a non-`judger` block, and `turbo` is validated then dropped from
 the plan (turbo is controlled by the Ansible host role, not the controller).
@@ -258,6 +408,19 @@ The Judger digest is mandatory. Supply it with `--judger-digest` (raw hex or
 `sha256:...`) or `--judger-digest-file <path>`. The authoritative alpha.4 amd64
 digest is pinned in `images/judger-bench.Dockerfile`
 (`JUDGER_AMD64_SHA256`) and re-checked at run time by `judger-bench`.
+
+Build the OCI worker locally, then obtain the immutable ID accepted by
+`--benchmark-image`:
+
+```bash
+docker build -f images/judger-bench.Dockerfile -t judger-bench:alpha.4 .
+docker image inspect --format '{{.Id}}' judger-bench:alpha.4
+```
+
+OCI mode uses `/app/sandbox/libjudger.so` from that image and still passes the
+plan's alpha.4 digest to `judger-bench --judger-sha256`; it never stages or uses
+a host Judger. Worker containers carry run/block labels, are force-removed on
+failure, and are checked for run-scoped residuals before and after each block.
 
 Every request, event, and artifact carries the sealed plan's SHA-256 (canonical
 plan JSON). The agent re-computes and rejects a mismatched staged plan.
@@ -298,8 +461,10 @@ implementation. For each host it builds:
   policy still apply.
 
 The transport only places validated remote tokens on the command line; plan
-JSON and other untrusted data travel over stdin. Remote paths must be absolute
-and are validated before any `ssh`/`scp` invocation.
+JSON and other untrusted data travel over stdin. Uploads are restricted to
+validated files directly beneath the fixed run staging directory; run IDs,
+remote paths, creation, hashing, and recursive directory removal are validated
+before any `ssh`/`scp` invocation.
 
 ## Host qualification and provisioning
 
@@ -307,8 +472,8 @@ These are driven by Ansible, not by `iris-benchctl provision`/`qualify` (both
 unimplemented).
 
 ```bash
-# Read-only, but become: true and post-provision assertions; needs a password.
-scripts/qualify-host.sh codedang8 --ask-become-pass
+# Read-only post-provision assertions; no privilege escalation.
+scripts/qualify-host.sh codedang8
 
 # Provision and verify (requires sudo; interactive become password).
 ANSIBLE_CONFIG=ansible/ansible.cfg \
@@ -338,8 +503,8 @@ drift. It writes a JSON report under `IRIS_BENCH_REPORT_DIR` (default
 disabled; it is never removed.
 
 Privileged real-host validation: `run-block` requires root or a delegated
-cgroup v2 subtree and a worker command (`--bench-binary` or a `--worker-arg`
-template), and `judger-bench` uses the external alpha.4 Judger library. None of
+cgroup v2 subtree, the sealed precompiled workload, and the `judger-bench`
+worker command; `judger-bench` uses the external alpha.4 Judger library. None of
 that is exercised by unit tests or CI here; it must be validated on a qualified
 host with sudo. The unit tests use a fake cgroup filesystem and fake processes
 only.
@@ -520,30 +685,54 @@ mutating verb.
 
 - the run is qualified (`qualification/host-facts.json`) and prepared;
 - the staged plan digest matches the request;
+- the host facts satisfy the sealed qualification requirements;
+- the fixture input and expected output match their sealed digests;
+- the workload binary matches its sealed SHA-256;
 - `--cgroup-parent` names an explicitly delegated cgroup v2 subtree;
-- the block has a `cpuList` and a worker binary (`--bench-binary` or a
-  `--worker-arg` template).
+- the block has a `cpuList` and the worker command is available.
 
-It splits the CPU list round-robin across workers, creates one cgroup subtree
-per worker, starts the workers behind a readiness barrier via the binary's
+It splits the CPU list round-robin across workers, creates one flat, run-scoped
+cgroup subtree per worker directly beneath `--cgroup-parent` (a single component
+such as `<run-id>-<block-id>-<worker-id>`; nested paths cannot inherit the
+delegated `cpuset`/`cpu` controllers the benchmark writes and verifies), starts
+the workers behind a readiness barrier via the binary's
 internal `worker-exec` wrapper, verifies each PID's membership from `/proc`
-before releasing it, and writes `samples/judger.ndjson` plus a block receipt.
+before releasing it, and writes `samples/<block-id>.ndjson`,
+`telemetry/thermal-<block-id>.ndjson`, and a block receipt.
 Any process observed outside the intended subtree is a failed run, not a
-warning. `judger-bench` re-checks the pinned Judger SHA-256 and rejects samples
-whose reported cgroup is not beneath the expected parent.
+warning, except for the root sandbox or its descendants accepted by explicit
+`production-compat` mode. `judger-bench` rejects non-success result/error codes,
+output mismatches, and invalid cgroup evidence. Validation requires a passing
+receipt and exact sample hash/count for every planned block.
+
+Because the controller reaches the agent through an SSH session, the agent
+starts in a `session-*.scope` cgroup that is a sibling of, not a descendant of,
+the delegated `user@<uid>.service` parent. Moving workers into that parent would
+fail the kernel's common-ancestor permission rule. After parsing its flags and
+before reading the request, the agent therefore validates that `--cgroup-parent`
+is an absolute path strictly beneath the cgroup v2 mount and, when the current
+process is not already inside it, re-executes itself as
+`systemd-run --user --scope --quiet --collect -- <agent> <original
+args>`. No shell is involved, standard descriptors and exit status are
+preserved, and a private recursion guard marks the scoped child. The guarded
+child confirms from `/proc` that it is beneath the configured parent before it
+proceeds and fails closed otherwise. The internal `worker-exec` subcommand is
+dispatched before this check and never re-executes, since it already runs under
+the scoped agent.
 
 ## Safe cleanup
 
 - The agent's `cleanup` verb removes **only** `/run/iris-bench/<run-id>` after
   verifying the path's basename equals the run ID, then writes a `cleaned`
   record. Evidence under `/var/lib/iris-bench/<run-id>` is preserved. `run`
-  invokes `validate`, `bundle`, and `cleanup`; `collect` remains a separate
+  invokes `validate`, `cleanup`, and then `bundle`, so cleanup evidence is
+  inventoried; `collect` remains a separate
   controller step.
 - `collect` downloads into a temporary directory and renames atomically; a
   failure removes only the temporary directory and an existing result directory
   is never overwritten.
-- `run` creates a local temporary plan file and removes it; the remote staged
-  plan at `/tmp/iris-bench-<run-id>.plan.json` is not removed by the CLI.
+- After a successful bundle, `run` removes only the exact run-scoped `/tmp`
+  files it uploaded: plan, fixtures, optional workload, report, and agent.
 - Ansible disables, but never removes, unrelated desktop/printing/discovery/
   update services, and never deletes K3s state.
 - Terraform protects the persistent RDS instance (`deletion_protection = true`,
@@ -554,16 +743,13 @@ whose reported cgroup is not beneath the expected parent.
 
 ## Not supported in this build
 
-- `iris-benchctl provision`, `qualify`, `analyze`, and `resume`.
+- `iris-benchctl provision`, `qualify`, and `resume`.
 - The full-Iris suite and AMQP. There is no `internal/amqp` package, no
   RabbitMQ lifecycle, no publisher/collector, and no message-conservation
   validation. The agent refuses any block whose suite is not `judger`.
   `iris.rabbitmqImage` is carried into a plan when configured but is unused.
 - RDS- and S3-backed judge data paths in the runner. The AWS workflow prepares
   the database and fixtures, but the agent does not read from them.
-- Controller-side agent installation or version staging. `run` calls the agent
-  at the versioned remote path but never uploads it; the operator must stage the
-  version-matched binary first.
 - Topology-aware CPU/NUMA auto-assignment. `cpuList` is operator-supplied and
   `numaPolicy` is recorded but not enforced.
 - Privileged real-host validation in tests/CI; only fake-filesystem unit tests

@@ -6,9 +6,11 @@ Last reviewed: 2026-09-25
 > integrity checks, host planning, and dry-run inspection are reproducible from
 > the repository alone. The full measurement path is blocked and must not be
 > promised: Track A artifacts are not in this repository, the full-Iris/AMQP
-> ladder is unimplemented, controller-side agent staging is missing, and the
-> Judger containment gate fails closed. Expect `plan` and `run --dry-run` to
-> work and a real accepted run to be impossible until those gates are resolved.
+> ladder is unimplemented, and the isolated Judger containment gate fails
+> closed. The direct controller can stage fixtures, a precompiled workload, and
+> a version-matched agent; it never compiles arbitrary source. A real run is possible only in
+> explicit `--production-compat` mode, and is marked uncontained and
+> non-comparable to isolated runs. Full Iris/AMQP remains unavailable.
 
 This is the operator manual for reproducing the original **Wave 1** Iris
 runtime-reproducibility experiment. It is written so that a new operator, on a
@@ -218,7 +220,12 @@ go run ./cmd/iris-benchctl plan \
   --profile isolated-1s \
   --iris-digest sha256:39b743d6e1ffb1efaa18f42b509c2017b91c11976971c862beafda2ae1521250 \
   --judger-digest 2c9a4da817e06f49daabe6b437f81d10f78b42be517d2e345ab4f868a4189103 \
-  --fixture cpp-runtime-v1=fixtures/568/15850.in
+  --benchmark-image sha256:<local-judger-bench-image-id> \
+  --bench-binary /opt/iris-bench/bin/judger-bench \
+  --bench-binary-sha256 <workload-sha256> \
+  --fixture cpp-runtime-v1=/absolute/shared/path/15850.in \
+  --expected-output cpp-runtime-v1=/absolute/shared/path/15850.out \
+  --production-compat
 
 # 3. Inspect the plan without mutation (same mandatory digests).
 go run ./cmd/iris-benchctl run \
@@ -226,20 +233,32 @@ go run ./cmd/iris-benchctl run \
   --host codedang8 --profile isolated-1s --dry-run \
   --iris-digest sha256:39b743d6e1ffb1efaa18f42b509c2017b91c11976971c862beafda2ae1521250 \
   --judger-digest 2c9a4da817e06f49daabe6b437f81d10f78b42be517d2e345ab4f868a4189103 \
-  --fixture cpp-runtime-v1=fixtures/568/15850.in
+  --benchmark-image sha256:<local-judger-bench-image-id> \
+  --bench-binary /opt/iris-bench/bin/judger-bench \
+  --bench-binary-sha256 <workload-sha256> \
+  --fixture cpp-runtime-v1=/absolute/shared/path/15850.in \
+  --expected-output cpp-runtime-v1=/absolute/shared/path/15850.out \
+  --production-compat
 ```
 
 Notes from real use:
 
-- `plan` and `run` require `--iris-digest` and `--judger-digest`; the `...`
-  placeholders in older notes are not optional. Without `--fixture`, the sealed
-  plan reports `"fixtures": null`.
+- `plan` and `run` require `--iris-digest`, `--judger-digest`, and either
+  `--local-bench-binary` or both `--bench-binary` and
+  `--bench-binary-sha256`; the placeholders in older notes are not optional.
+  Exactly one `--fixture` and matching `--expected-output` are mandatory for a
+  runnable direct Judger plan.
+- `--production-compat` additionally requires an exact local Docker image ID
+  from `docker image inspect --format '{{.Id}}' judger-bench:alpha.4`. The
+  controller seals and forwards it; the agent runs one privileged,
+  host-cgroup-namespace container per worker and uses the image's
+  `/app/sandbox/libjudger.so` while re-checking the sealed alpha.4 digest.
 - `--resolve-image` needs Docker with `buildx`. If it is unavailable, pass
   `--iris-digest` explicitly (the `.env.example` value is a reviewed cache, not
   a guarantee).
 - The `isolated-1s` profile uses `cpuList: "2-3"` (two CPUs). For a strict
   one-CPU baseline, use the `isolated-1s-single-cpu` profile.
-- `iris-benchctl provision`, `qualify`, `analyze`, and `resume` are **not
+- `iris-benchctl provision`, `qualify`, and `resume` are **not
   implemented**. Host provisioning/qualification use the Ansible role.
 - `scripts/qualify-host.sh` is read-only but runs `become: true` and ends in
   post-provision assertions, so it **only passes after** `provision`. On a fresh
@@ -250,7 +269,7 @@ host):
 
 ```bash
 # Read-only report; requires a password for become.
-scripts/qualify-host.sh codedang8 --ask-become-pass
+scripts/qualify-host.sh codedang8
 
 # Provision (idempotent; reboot may occur on first run).
 ANSIBLE_CONFIG=ansible/ansible.cfg \
@@ -264,12 +283,21 @@ sysctls). On a host that has not been provisioned it cannot pass. Order is
 
 Gated (do not claim success):
 
-- `run-block` **fails closed** because Judger alpha.4 writes
-  `/sys/fs/cgroup/sandbox-<CONTAINER_ID>` at the cgroup root and offers no way
-  to select a delegated parent (see §9). The agent also requires an already
-  staged binary at `/opt/iris-bench/bin/<toolVersion>/iris-bench-agent`, a
-  `--cgroup-parent` delegated subtree, and worker arguments. No controller
-  command installs the agent.
+- Isolated `run-block` **fails closed** because Judger alpha.4 writes
+  `/sandbox-<CONTAINER_ID>` at the cgroup root and offers no way to select a
+  delegated parent (see §9). `--production-compat` accepts that root or a
+  descendant such as `/sandbox-<CONTAINER_ID>/box-*` in either the
+  mount-relative form the monitor holds or the full filesystem form the live
+  Judger reports (`/sys/fs/cgroup/sandbox-<CONTAINER_ID>/...`), but marks
+  samples uncontained and the run non-comparable. Production-compat
+  requires the sealed OCI worker image because unprivileged host execution does
+  not reproduce this root cgroup quirk. The agent also requires an already
+  staged binary at `/opt/iris-bench/bin/<toolVersion>/iris-bench-agent` or an
+  executable supplied with `--local-agent`, a `--cgroup-parent` delegated
+  subtree and a qualified host; OCI mode does not stage or use a host Judger.
+  For an actual run, omit `--dry-run`, provide those flags, provision then
+  qualify the host, and pass the sanitized report with
+  `--qualification-report` if comparable qualification evidence is required.
 
 When Track B is unblocked, the intended flow is:
 
@@ -280,8 +308,8 @@ When Track B is unblocked, the intended flow is:
    gated.
 4. `collect`, then analyze; write an immutable run bundle.
 
-Until then, Track B produces qualification evidence and a resolved plan, not an
-accepted measurement.
+Until Judger supports a delegated parent, Track B can produce accepted
+production-compat diagnostics, but not an accepted isolated measurement.
 
 ---
 
@@ -309,14 +337,16 @@ counter deltas, cgroup throttling, NUMA locality).
 runs/<run-id>/
 ├── manifest.json          # versions, digests, host facts, parameters
 ├── qualification/         # host facts and readiness
-├── config/                # resolved plan and profiles
-├── samples/               # judger.ndjson, iris.ndjson
-├── telemetry/             # pressure/PSI, frequency, thermal
-├── logs/                  # iris-<rung>.log
-├── analysis/              # statistics output
+├── plan.json              # sealed resolved run plan
+├── samples/               # <block-id>.ndjson
+├── receipts/              # <block-id>.json
+├── telemetry/             # thermal-<block-id>.ndjson
 ├── checksums.sha256
 └── COMPLETE               # only after counts, conservation, checks, cleanup
 ```
+
+`checksums.sha256` covers every regular published file, including `COMPLETE`,
+except itself; the checksum list is not recursively checksummed.
 
 Partial runs stay available but are marked invalid with a machine-readable
 reason. Never write credentials or full connection strings into a bundle.
@@ -350,14 +380,31 @@ reason. Never write credentials or full connection strings into a bundle.
 ## 9. Known blockers and gates (as of this review)
 
 1. **Judger containment (Gate 0).** alpha.4 hardcodes the root-level sandbox
-   cgroup and has no delegated-parent option. The direct suite refuses to accept
-   a sample outside the intended subtree, so it cannot currently produce an
-   accepted measurement. Resolution is a reviewed Judger patch/upgrade, a
-   private-cgroup mount, or a KVM fallback (see `README.md`).
+   cgroup and has no delegated-parent option. Isolated mode refuses it.
+   `--production-compat` accepts `/sandbox-<CONTAINER_ID>` or its descendants and labels the
+   result uncontained/non-comparable; validation normalizes the live filesystem
+   form `/sys/fs/cgroup/sandbox-<CONTAINER_ID>/...` and the mount-relative form
+   to the same run-scoped root. Live alpha.4 leaves one empty `box-*` child per
+   iteration under that root, but the residue is safely removed after the
+   evidence is read: the agent removes the empty root and its empty
+   `box-<safe-id>` children only after proving `cgroup.procs` is empty for
+   each, that no box has a grandchild cgroup, and that no unexpected directory
+   name remains. Validation returns canonical full filesystem paths
+   children-first, root-last, and root absence is verified afterwards. Any
+   residual member, deeper child, or unexpected child fails the block and is
+   preserved rather than blindly deleted. Because the stock root is root-owned,
+   the unprivileged manager cannot `rmdir` it directly in OCI mode; the agent
+   instead validates the paths read-only and removes them with a single
+   argv-only privileged helper container from the sealed image (`docker run
+   --rm --privileged --cgroupns=host --entrypoint /bin/rmdir --mount
+   type=bind,src=<mount>,dst=<mount> <image> <child>... <root>`, no shell; host
+   mode removes the same validated paths in order). The run-scoped helper name
+   and labels make residual cleanup remove an interrupted helper. This does not
+   resolve the isolated gate.
 2. **server8 detached.** Track A cannot run against it until a benchmark node is
    returned to a cluster; Track B targets it standalone.
 3. **Full-Iris suite unimplemented.** The A/C ladder cannot be driven through the
-   toolset yet; only qualification and planning are available.
+   toolset yet; only the direct Judger suite is runnable and analyzable.
 4. **Privileged validation unperformed.** No real-host cgroup/delegation or
    container lifecycle has been exercised in tests.
 5. **cgroup-related measurement subtlety.** alpha.4 defines `cpu_time` as
@@ -397,11 +444,13 @@ As of this review, the following are honest limits:
   account must create its own.
 - **The Iris digest is a cache, not a resolution.** Without Docker/buildx you
   cannot re-resolve `ghcr.io/skkuding/codedang-iris:stage` from the repo alone.
-- **The agent and Judger are external.** The controller does not stage
-  `iris-bench-agent`, and the alpha.4 Judger binary is downloaded by the image
-  build; neither ships as a committed binary.
-- **Measurement remains gated.** Gate 0 (Judger containment) and the
-  unimplemented full-Iris/AMQP suite block an accepted end-to-end measurement.
+- **The agent and Judger are external.** The controller can stage an explicit
+  `--local-agent` and verifies its remote SHA-256 before execution. The alpha.4
+  Judger binary is downloaded by the image build; neither ships as a committed
+  binary.
+- **Isolated measurement remains gated.** Production-compat diagnostics can be
+  accepted but are non-comparable. Gate 0 and full Iris/AMQP still block an
+  isolated Wave 1 end-to-end measurement.
 - **Hand off a clean tree.** Use a normal clone or an archive that excludes
   untracked, secret-bearing files such as `terraform.tfvars`, `*.tfstate*`,
   `.env`, and `.terraform/`. Do not package a live working directory as-is.
