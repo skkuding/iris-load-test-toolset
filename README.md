@@ -290,6 +290,27 @@ CV percentage, linearly interpolated p90/p95/p99, max, and p99/median for
 not the timing distributions. A successful sample with absent or invalid timing
 fields makes analysis fail rather than silently introducing a zero.
 
+Direct-suite measurements are windowed to the **all-workers-active steady
+window**. `judger-bench` records a host-wide wall-clock timestamp immediately
+before and after every execute-mode submission (`startedAtNs`/`endedAtNs`).
+After a block, the coordinator derives each worker's active interval
+`[min startedAtNs, max endedAtNs]` and the window
+`[max over workers of first start, min over workers of last end]`. A passing
+block requires that every worker contributed at least one sample with valid
+positive timestamps, that the window is non-empty, and that its duration is at
+least `min(2s, 0.5 × (max lastEnd − min firstStart))`. The receipt records
+`steadyWindowStartNs`, `steadyWindowEndNs`, and `steadyWindowSeconds`; a block
+whose window is missing, empty, or negligible fails instead of reporting an
+unsynchronized window. When timestamps are present, `analyze` computes the
+`cpuTimeMs` and `realTimeMs` distributions only from successful samples whose
+`[start,end]` falls inside the window and reports the window fields
+(`steadyWindowApplied`, `steadyWindowStartNs`, `steadyWindowEndNs`,
+`steadyWindowSeconds`) in the JSON summary. Bundles without timestamps keep the
+pre-window behavior. The OCI container-start ramp and the drain tail are
+excluded from the primary statistics because container/image creation, cgroup
+setup, and the final partial iterations measure startup and teardown timing
+rather than the closed-loop steady state.
+
 The report is comparable only when the bundle has a valid comparable manifest,
 a `COMPLETE` marker, non-empty `qualification/host-facts.json`, and valid thermal
 evidence in `telemetry/thermal-<block-id>.ndjson` for every planned block. The
@@ -704,6 +725,20 @@ warning, except for the root sandbox or its descendants accepted by explicit
 `production-compat` mode. `judger-bench` rejects non-success result/error codes,
 output mismatches, and invalid cgroup evidence. Validation requires a passing
 receipt and exact sample hash/count for every planned block.
+
+Each worker is started behind the local readiness barrier and then runs a
+closed loop with no client-side delay: as soon as the barrier is released, the
+worker submits its next iteration the moment the previous one returns. The
+coordinator releases the barrier only after every worker has attached to its
+verified subtree and signalled ready, so within the resulting
+all-workers-active steady window every worker always has a submission in flight
+or pending and the system under test is never idle. The coordinator refuses a
+run whose window is missing, empty, or negligible (see
+[analyze](#analyze)). Only submissions fully inside
+`[max first start, min last end]` feed primary statistics; the OCI
+container-start ramp and the drain tail are excluded because they measure
+container and cgroup setup plus the final partial iterations, not the
+steady-state contention the benchmark exists to observe.
 
 Because the controller reaches the agent through an SSH session, the agent
 starts in a `session-*.scope` cgroup that is a sibling of, not a descendant of,

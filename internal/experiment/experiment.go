@@ -139,8 +139,16 @@ type Receipt struct {
 	Workers              []WorkerReceipt `json:"workers"`
 	Escape               string          `json:"escape,omitempty"`
 	Failure              string          `json:"failure,omitempty"`
-	StartedAt            time.Time       `json:"startedAt"`
-	DurationMillis       float64         `json:"durationMillis"`
+	// SteadyWindowStartNs and SteadyWindowEndNs bound the interval in which
+	// every worker had at least one submission in flight or pending
+	// simultaneously. SteadyWindowSeconds is that interval's duration in
+	// seconds. They are zero only on a failure receipt; a passing block always
+	// records a validated window.
+	SteadyWindowStartNs int64     `json:"steadyWindowStartNs"`
+	SteadyWindowEndNs   int64     `json:"steadyWindowEndNs"`
+	SteadyWindowSeconds float64   `json:"steadyWindowSeconds"`
+	StartedAt           time.Time `json:"startedAt"`
+	DurationMillis      float64   `json:"durationMillis"`
 }
 
 // Result reports the written artifacts of a completed block.
@@ -355,7 +363,7 @@ func (c *Coordinator) Run(ctx context.Context, req BlockRequest) (result Result,
 	// Collect and count samples before removing evidence-bearing cgroups. Each
 	// sample must prove its own containment; a sample that reports escape or a
 	// mismatched worker identity is a failed block, not merely a warning.
-	samples, sampleCount, err := collectSamples(req, states)
+	samples, sampleCount, window, err := collectSamples(req, states)
 	if err != nil {
 		cleanup()
 		c.emitCheck("sample-count", StatusFailed, err.Error())
@@ -363,6 +371,7 @@ func (c *Coordinator) Run(ctx context.Context, req BlockRequest) (result Result,
 		return Result{}, err
 	}
 	c.emitCheck("sample-count", StatusPassed, fmt.Sprintf("%d samples", sampleCount))
+	c.emitCheck("steady-window", StatusPassed, fmt.Sprintf("%dns..%dns (%.3fs)", window.startNs, window.endNs, float64(window.endNs-window.startNs)/1e9))
 
 	// Remove subtrees and prove none remain.
 	for _, st := range states {
@@ -394,7 +403,7 @@ func (c *Coordinator) Run(ctx context.Context, req BlockRequest) (result Result,
 	}
 	c.emitPhase("samples", StatusPassed)
 
-	receipt := buildReceipt(req, states, sampleCount, samplesHash, "", "", start, c.now())
+	receipt := buildReceipt(req, states, sampleCount, samplesHash, "", "", window, start, c.now())
 	receiptPath := filepath.Join(req.RunDir, filepath.FromSlash(req.ReceiptName))
 	if err := artifact.WriteJSONAtomic(receiptPath, receipt, 0o644); err != nil {
 		return Result{}, fmt.Errorf("experiment: write receipt: %w", err)
@@ -637,15 +646,35 @@ type sampleProbe struct {
 	OutputMatches   bool   `json:"outputMatches"`
 	ContainmentMode string `json:"containmentMode"`
 	Comparable      bool   `json:"comparable"`
+	StartedAtNs     int64  `json:"startedAtNs"`
+	EndedAtNs       int64  `json:"endedAtNs"`
 }
 
-func collectSamples(req BlockRequest, states []workerState) ([]byte, int, error) {
+// steadyWindow is the validated all-workers-active interval shared by every
+// worker in one block.
+type steadyWindow struct {
+	startNs int64
+	endNs   int64
+}
+
+// minSteadyWindowNs is the floor that keeps a "steady" window from being a
+// scheduling artifact. The accepted window must also cover at least half of the
+// full first-start-to-last-end span; see steadyWindowFromSamples.
+const minSteadyWindowNs int64 = int64(2 * time.Second)
+
+// collectSamples reads and validates every worker's NDJSON samples, counts them
+// against ExpectedSamples, and derives the block's all-workers-active steady
+// window. Samples are never dropped and the expected/validation semantics are
+// unchanged. A block whose steady window is missing, empty, or negligible is
+// rejected so an unsynchronized window is never reported as a measurement.
+func collectSamples(req BlockRequest, states []workerState) ([]byte, int, steadyWindow, error) {
 	var buf bytes.Buffer
 	total := 0
-	for _, st := range states {
+	intervals := make([]workerInterval, len(states))
+	for i, st := range states {
 		data, err := os.ReadFile(st.spec.OutputPath)
 		if err != nil {
-			return nil, 0, fmt.Errorf("experiment: worker %s samples: %w", st.spec.ID, err)
+			return nil, 0, steadyWindow{}, fmt.Errorf("experiment: worker %s samples: %w", st.spec.ID, err)
 		}
 		count := 0
 		for _, line := range bytes.Split(data, []byte{'\n'}) {
@@ -655,21 +684,86 @@ func collectSamples(req BlockRequest, states []workerState) ([]byte, int, error)
 			}
 			var probe sampleProbe
 			if err := json.Unmarshal(line, &probe); err != nil {
-				return nil, 0, fmt.Errorf("experiment: worker %s emitted invalid NDJSON: %w", st.spec.ID, err)
+				return nil, 0, steadyWindow{}, fmt.Errorf("experiment: worker %s emitted invalid NDJSON: %w", st.spec.ID, err)
 			}
 			if err := validateSample(req, st, probe); err != nil {
-				return nil, 0, fmt.Errorf("experiment: worker %s sample %d: %w", st.spec.ID, count, err)
+				return nil, 0, steadyWindow{}, fmt.Errorf("experiment: worker %s sample %d: %w", st.spec.ID, count, err)
 			}
+			intervals[i].observe(probe.StartedAtNs, probe.EndedAtNs)
 			buf.Write(line)
 			buf.WriteByte('\n')
 			count++
 			total++
 		}
 		if count != st.spec.ExpectedSamples {
-			return nil, 0, fmt.Errorf("experiment: worker %s produced %d samples, expected %d", st.spec.ID, count, st.spec.ExpectedSamples)
+			return nil, 0, steadyWindow{}, fmt.Errorf("experiment: worker %s produced %d samples, expected %d", st.spec.ID, count, st.spec.ExpectedSamples)
 		}
 	}
-	return buf.Bytes(), total, nil
+	window, err := steadyWindowFromSamples(req.BlockID, states, intervals)
+	if err != nil {
+		return nil, 0, steadyWindow{}, err
+	}
+	return buf.Bytes(), total, window, nil
+}
+
+// workerInterval accumulates one worker's active interval from its samples.
+type workerInterval struct {
+	firstStart int64
+	lastEnd    int64
+	valid      int
+}
+
+// observe widens the worker's interval with a sample's positive timestamps.
+// Samples without valid positive timestamps are ignored here; the block-level
+// check below still requires every worker to contribute at least one.
+func (w *workerInterval) observe(startedAtNs, endedAtNs int64) {
+	if startedAtNs <= 0 || endedAtNs <= 0 || endedAtNs < startedAtNs {
+		return
+	}
+	if w.valid == 0 || startedAtNs < w.firstStart {
+		w.firstStart = startedAtNs
+	}
+	if w.valid == 0 || endedAtNs > w.lastEnd {
+		w.lastEnd = endedAtNs
+	}
+	w.valid++
+}
+
+// steadyWindowFromSamples validates and returns the all-workers-active window:
+// [max over workers of first start, min over workers of last end]. It fails
+// closed when any worker has no valid timestamp, when the window is empty, or
+// when it is negligible relative to the block's full span.
+func steadyWindowFromSamples(blockID string, states []workerState, intervals []workerInterval) (steadyWindow, error) {
+	var minFirst, maxLast int64
+	var windowStart, windowEnd int64
+	for i, w := range intervals {
+		if w.valid == 0 {
+			return steadyWindow{}, fmt.Errorf("experiment: block %s worker %s has no sample with valid positive timestamps; refusing an unsynchronized measurement window", blockID, states[i].spec.ID)
+		}
+		if i == 0 || w.firstStart < minFirst {
+			minFirst = w.firstStart
+		}
+		if i == 0 || w.lastEnd > maxLast {
+			maxLast = w.lastEnd
+		}
+		if i == 0 || w.firstStart > windowStart {
+			windowStart = w.firstStart
+		}
+		if i == 0 || w.lastEnd < windowEnd {
+			windowEnd = w.lastEnd
+		}
+	}
+	if windowStart >= windowEnd {
+		return steadyWindow{}, fmt.Errorf("experiment: block %s all-workers-active window is empty (start %dns >= end %dns); refusing an unsynchronized measurement window", blockID, windowStart, windowEnd)
+	}
+	required := (maxLast - minFirst) / 2
+	if required > minSteadyWindowNs {
+		required = minSteadyWindowNs
+	}
+	if windowEnd-windowStart < required {
+		return steadyWindow{}, fmt.Errorf("experiment: block %s all-workers-active window %dns is negligible (< %dns over a %dns span); refusing an unsynchronized measurement window", blockID, windowEnd-windowStart, required, maxLast-minFirst)
+	}
+	return steadyWindow{startNs: windowStart, endNs: windowEnd}, nil
 }
 
 // validateSample rejects a sample that does not prove containment in the
@@ -727,13 +821,13 @@ func pathWithin(parent, child string) bool {
 }
 
 func (c *Coordinator) writeFailureReceipt(req BlockRequest, states []workerState, cause error, start time.Time) {
-	receipt := buildReceipt(req, states, 0, "", cause.Error(), "", start, c.now())
+	receipt := buildReceipt(req, states, 0, "", cause.Error(), "", steadyWindow{}, start, c.now())
 	receipt.Status = StatusFailed
 	path := filepath.Join(req.RunDir, filepath.FromSlash(req.ReceiptName))
 	_ = artifact.WriteJSONAtomic(path, receipt, 0o644)
 }
 
-func buildReceipt(req BlockRequest, states []workerState, sampleCount int, samplesHash, failure, escape string, start, end time.Time) Receipt {
+func buildReceipt(req BlockRequest, states []workerState, sampleCount int, samplesHash, failure, escape string, window steadyWindow, start, end time.Time) Receipt {
 	r := Receipt{
 		SchemaVersion:        1,
 		RunID:                req.RunID,
@@ -745,6 +839,9 @@ func buildReceipt(req BlockRequest, states []workerState, sampleCount int, sampl
 		WorkloadBinarySHA256: req.WorkloadBinarySHA256,
 		Escape:               escape,
 		Failure:              failure,
+		SteadyWindowStartNs:  window.startNs,
+		SteadyWindowEndNs:    window.endNs,
+		SteadyWindowSeconds:  float64(window.endNs-window.startNs) / 1e9,
 		StartedAt:            start.UTC(),
 		DurationMillis:       float64(end.Sub(start).Milliseconds()),
 	}

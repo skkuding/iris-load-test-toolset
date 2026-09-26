@@ -19,8 +19,11 @@ Usage:
         --run 30=runs/iris-20260926-wave1-30 \
         --out wave1-direct-sweep.png
 
-Only successful samples contribute to the timing and memory distributions. The
-plot is written outside the bundles to preserve their checksums.
+Only successful samples contribute to the timing and memory distributions. When
+samples carry host-wide timestamps, only samples inside the all-workers-active
+steady window (max per-worker first start through min per-worker last end)
+contribute, and the window duration is annotated. The plot is written outside
+the bundles to preserve their checksums.
 """
 
 from __future__ import annotations
@@ -47,7 +50,34 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def load_run(run_dir: Path) -> dict[str, list[float]]:
+def steady_window(records: list[dict]) -> tuple[int, int] | None:
+    """Return the all-workers-active window as (startNs, endNs).
+
+    The window is the max of per-worker first starts through the min of
+    per-worker last ends. It is None when any record lacks valid positive
+    timestamps, so an untimestamped bundle keeps its pre-window behavior.
+    """
+    per_worker: dict[str, tuple[int, int]] = {}
+    for record in records:
+        started = record.get("startedAtNs")
+        ended = record.get("endedAtNs")
+        if not isinstance(started, int) or not isinstance(ended, int):
+            return None
+        if started <= 0 or ended <= 0 or ended < started:
+            return None
+        worker = str(record.get("worker", ""))
+        first, last = per_worker.get(worker, (started, ended))
+        per_worker[worker] = (min(first, started), max(last, ended))
+    if not per_worker:
+        return None
+    start = max(first for first, _ in per_worker.values())
+    end = min(last for _, last in per_worker.values())
+    if end <= start:
+        return None
+    return start, end
+
+
+def load_run(run_dir: Path) -> tuple[dict[str, list[float]], float | None]:
     samples_dir = run_dir / "samples"
     if not samples_dir.is_dir():
         raise SystemExit(f"error: no samples directory in {run_dir}")
@@ -55,9 +85,7 @@ def load_run(run_dir: Path) -> dict[str, list[float]]:
     if not files:
         raise SystemExit(f"error: no *.ndjson samples in {samples_dir}")
 
-    cpu: list[float] = []
-    real: list[float] = []
-    mem: list[float] = []
+    successful: list[dict] = []
     for path in files:
         for line in path.read_text().splitlines():
             line = line.strip()
@@ -69,13 +97,30 @@ def load_run(run_dir: Path) -> dict[str, list[float]]:
                 continue
             if record.get("status") != "success":
                 continue
-            if isinstance(record.get("cpuTimeMs"), (int, float)):
-                cpu.append(float(record["cpuTimeMs"]))
-            if isinstance(record.get("realTimeMs"), (int, float)):
-                real.append(float(record["realTimeMs"]))
-            if isinstance(record.get("memoryBytes"), (int, float)):
-                mem.append(float(record["memoryBytes"]) / 1048576.0)
-    return {"cpu": cpu, "real": real, "mem": mem}
+            successful.append(record)
+
+    window = steady_window(successful)
+    window_seconds: float | None = None
+    if window is not None:
+        start, end = window
+        successful = [
+            record
+            for record in successful
+            if start <= record["startedAtNs"] and record["endedAtNs"] <= end
+        ]
+        window_seconds = (end - start) / 1e9
+
+    cpu: list[float] = []
+    real: list[float] = []
+    mem: list[float] = []
+    for record in successful:
+        if isinstance(record.get("cpuTimeMs"), (int, float)):
+            cpu.append(float(record["cpuTimeMs"]))
+        if isinstance(record.get("realTimeMs"), (int, float)):
+            real.append(float(record["realTimeMs"]))
+        if isinstance(record.get("memoryBytes"), (int, float)):
+            mem.append(float(record["memoryBytes"]) / 1048576.0)
+    return {"cpu": cpu, "real": real, "mem": mem}, window_seconds
 
 
 def percentile(values: list[float], p: float) -> float:
@@ -128,6 +173,7 @@ def main(argv: list[str]) -> int:
     args = parse_args(argv)
     labels: list[str] = []
     data: dict[str, dict[str, list[float]]] = {}
+    windows: dict[str, float | None] = {}
     for spec in args.run:
         label, sep, directory = spec.partition("=")
         if not sep or not label or not directory:
@@ -136,7 +182,7 @@ def main(argv: list[str]) -> int:
         if not run_dir.is_dir():
             raise SystemExit(f"error: run directory not found: {run_dir}")
         labels.append(label)
-        data[label] = load_run(run_dir)
+        data[label], windows[label] = load_run(run_dir)
 
     import matplotlib
 
@@ -181,12 +227,24 @@ def main(argv: list[str]) -> int:
         ax.grid(True, axis="y", alpha=0.3)
         ax.margins(y=0.08)
 
-    fig.tight_layout(rect=(0, 0, 1, 0.97))
+    window_note = "  ".join(
+        f"{label}: {windows[label]:.2f} s" for label in labels if windows[label] is not None
+    )
+    if window_note:
+        fig.text(
+            0.5, 0.006,
+            "steady window (all workers active): " + window_note,
+            ha="center", fontsize=9, color="#444444",
+        )
+    fig.tight_layout(rect=(0, 0.03, 1, 0.97))
     args.out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(args.out, dpi=150)
     plt.close(fig)
 
     print_table(labels, data)
+    for label in labels:
+        if windows[label] is not None:
+            print(f"{label:>6}  steady window {windows[label]:.3f} s")
     print(f"\nwrote {args.out}")
     return 0
 

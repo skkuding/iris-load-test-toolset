@@ -664,8 +664,9 @@ func (l *agentTestLauncher) Start(_ context.Context, spec experiment.WorkerSpec,
 		<-w.release
 		var b strings.Builder
 		for i := 0; i < spec.ExpectedSamples; i++ {
-			fmt.Fprintf(&b, "{\"runId\":%q,\"blockId\":\"block-01\",\"worker\":%q,\"cgroupPath\":%q,\"cgroupContained\":true,\"iteration\":%d,\"status\":\"success\",\"outputMatches\":true,\"containmentMode\":\"isolated\",\"comparable\":true}\n",
-				testRunID, spec.ID, filepath.Join(h.FSPath(), "sandbox-"+spec.ID), i)
+			started := int64(1_700_000_000_000_000_000) + int64(i)*1000
+			fmt.Fprintf(&b, "{\"runId\":%q,\"blockId\":\"block-01\",\"worker\":%q,\"cgroupPath\":%q,\"cgroupContained\":true,\"iteration\":%d,\"status\":\"success\",\"outputMatches\":true,\"containmentMode\":\"isolated\",\"comparable\":true,\"startedAtNs\":%d,\"endedAtNs\":%d}\n",
+				testRunID, spec.ID, filepath.Join(h.FSPath(), "sandbox-"+spec.ID), i, started, started+500)
 		}
 		_ = os.WriteFile(spec.OutputPath, []byte(b.String()), 0o644)
 		close(w.done)

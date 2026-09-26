@@ -15,6 +15,11 @@ Usage:
 
 By default the plot is written to <run-id>-timeseries.png in the current
 directory and a summary table is printed to stdout.
+
+When samples carry host-wide timestamps, only samples inside the
+all-workers-active steady window (max per-worker first start through min
+per-worker last end) are plotted and summarized, and the window duration is
+annotated. Without timestamps the script keeps its pre-window behavior.
 """
 
 from __future__ import annotations
@@ -71,6 +76,33 @@ def load_samples(run_dir: Path) -> list[dict]:
     return samples
 
 
+def steady_window(records: list[dict]) -> tuple[int, int] | None:
+    """Return the all-workers-active window as (startNs, endNs).
+
+    The window is the max of per-worker first starts through the min of
+    per-worker last ends. It is None when any record lacks valid positive
+    timestamps, so an untimestamped bundle keeps its pre-window behavior.
+    """
+    per_worker: dict[str, tuple[int, int]] = {}
+    for record in records:
+        started = record.get("startedAtNs")
+        ended = record.get("endedAtNs")
+        if not isinstance(started, int) or not isinstance(ended, int):
+            return None
+        if started <= 0 or ended <= 0 or ended < started:
+            return None
+        worker = str(record.get("worker", ""))
+        first, last = per_worker.get(worker, (started, ended))
+        per_worker[worker] = (min(first, started), max(last, ended))
+    if not per_worker:
+        return None
+    start = max(first for first, _ in per_worker.values())
+    end = min(last for _, last in per_worker.values())
+    if end <= start:
+        return None
+    return start, end
+
+
 def numeric(samples: list[dict], key: str) -> list[float]:
     values = []
     for record in samples:
@@ -119,6 +151,19 @@ def plot(run_dir: Path, samples: list[dict], manifest: dict, out_path: Path):
     if not successful:
         raise SystemExit("error: no successful samples to plot")
 
+    window = steady_window(successful)
+    window_note = "no timestamped steady window"
+    if window is not None:
+        window_start, window_end = window
+        successful = [
+            s
+            for s in successful
+            if window_start <= s.get("startedAtNs", 0) and s.get("endedAtNs", 0) <= window_end
+        ]
+        window_note = f"steady window {((window_end - window_start) / 1e9):.2f} s"
+    if not successful:
+        raise SystemExit("error: no successful samples inside the steady window")
+
     cpu = numeric(successful, "cpuTimeMs")
     real = numeric(successful, "realTimeMs")
     if not cpu or not real:
@@ -138,7 +183,7 @@ def plot(run_dir: Path, samples: list[dict], manifest: dict, out_path: Path):
 
     fig, (ax_series, ax_dist) = plt.subplots(1, 2, figsize=(13.5, 5.2))
     fig.suptitle(
-        f"{run_id}\nmode={mode}  comparable={comparable}  fixture={fixture}  blocks={len(block_ids)}",
+        f"{run_id}\nmode={mode}  comparable={comparable}  fixture={fixture}  blocks={len(block_ids)}\n{window_note}",
         fontsize=12,
     )
 
@@ -165,6 +210,7 @@ def plot(run_dir: Path, samples: list[dict], manifest: dict, out_path: Path):
     real_sum = summarize(real)
     lines = [
         f"n = {int(cpu_sum['n'])}",
+        window_note,
         "",
         "cpuTimeMs",
         f"  median {cpu_sum['median']:.1f}  mad {cpu_sum['mad']:.1f}  cv {cpu_sum['cv']:.2f}%",

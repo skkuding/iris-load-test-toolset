@@ -65,6 +65,18 @@ One-worker reference match:
 
 ## Reading the result
 
+Primary CPU/real/memory statistics in this comparison come from each run's
+**steady window**, not the whole block. Workers are released together behind the
+readiness barrier and each then runs closed-loop with no client-side delay, so
+inside the window every worker always has a submission in flight or pending and
+the system is never idle. `judger-bench` timestamps every submission with a
+host-wide clock; the window is `[max per-worker first start, min per-worker last
+end]`, and a missing, empty, or negligible window fails the block instead of
+being reported. The OCI container-start ramp and the drain tail are excluded
+from the primary statistics: container create/start and the final partial
+iterations measure setup and teardown, not the steady-state contention this
+comparison is about.
+
 - The reproduction shows the same shape as the original: median CPU and real
   time rise with concurrency and the distribution widens from 16 workers on.
 - Magnitudes are lower at high concurrency because the direct suite has no Iris,

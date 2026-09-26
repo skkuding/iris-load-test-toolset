@@ -206,6 +206,43 @@ func TestExecuteInvokesJudgerAndValidatesCgroup(t *testing.T) {
 	}
 }
 
+func TestExecuteRecordsHostWideTimestamps(t *testing.T) {
+	work := t.TempDir()
+	bin := filepath.Join(work, defaultBinaryName)
+	writeExecutable(t, bin, "#!/bin/sh\nexit 0\n")
+	parent := "/sys/fs/cgroup/bench.slice"
+	record := filepath.Join(work, "judger-args.txt")
+	judger := writeFakeJudger(t, work, record, judgerJSON(parent+"/sandbox-abc/box-1", 0, 0))
+
+	before := time.Now().UnixNano()
+	samples, err := runBench(context.Background(), options{
+		Mode:                 modeExecute,
+		Binary:               bin,
+		WorkDir:              work,
+		ExpectedOutput:       expectedOutput(t, work),
+		Iterations:           3,
+		JudgerPath:           judger,
+		ContainerID:          "abc",
+		ExpectedCgroupParent: parent,
+		Timeout:              3 * time.Second,
+	})
+	after := time.Now().UnixNano()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(samples) != 3 {
+		t.Fatalf("samples = %d, want 3", len(samples))
+	}
+	for _, s := range samples {
+		if s.StartedAtNs <= 0 || s.EndedAtNs < s.StartedAtNs {
+			t.Fatalf("timestamps not populated: %+v", s)
+		}
+		if s.StartedAtNs < before || s.EndedAtNs > after {
+			t.Fatalf("timestamps outside the invocation: %+v", s)
+		}
+	}
+}
+
 func TestExecutePassesExplicitArguments(t *testing.T) {
 	work := t.TempDir()
 	bin := filepath.Join(work, defaultBinaryName)

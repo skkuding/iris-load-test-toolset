@@ -318,6 +318,24 @@ production-compat diagnostics, but not an accepted isolated measurement.
 Report per testcase `cpuTime` and `realTime`: count, failures, median, MAD,
 stdev, CV, p90/p95/p99/max, and p99/median. Keep raw samples.
 
+Direct-suite blocks enforce a **steady measurement window**. Every worker is
+started behind the readiness barrier and then runs closed-loop with no
+client-side delay, so within the all-workers-active window every worker always
+has a submission in flight or pending and the system under test is never idle.
+`judger-bench` timestamps each submission with a host-wide clock
+(`startedAtNs`/`endedAtNs`). The coordinator takes the window as
+`[max over workers of first start, min over workers of last end]` and refuses
+the block when any worker has no valid positive timestamp, the window is empty,
+or its duration is below `min(2s, 0.5 × (max lastEnd − min firstStart))`. The
+receipt records `steadyWindowStartNs`, `steadyWindowEndNs`, and
+`steadyWindowSeconds`. Analyze and both plot scripts compute the primary timing
+distributions only from samples whose `[start,end]` falls inside the window.
+The OCI container-start ramp and the drain tail are excluded from these primary
+statistics because container/image creation, cgroup setup, and the final
+partial iterations measure startup and teardown latency rather than the
+closed-loop steady state the experiment is about. Bundles without timestamps
+keep the pre-window behavior.
+
 Initial qualification targets (targets, to be revised after first
 controlled data):
 

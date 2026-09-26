@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -292,8 +293,24 @@ func (s *captureSink) has(sub string) bool {
 
 // ---- helpers ----
 
+// sampleBaseNs is an arbitrary positive wall-clock base. Every worker's
+// synthetic samples share it so the all-workers-active window is well-formed.
+const sampleBaseNs int64 = 1_700_000_000_000_000_000
+
 func sampleLine(worker, cgroupPath string, i int) string {
-	return fmt.Sprintf(`{"worker":%q,"cgroupPath":%q,"cgroupContained":true,"iteration":%d,"status":"success","outputMatches":true,"containmentMode":"isolated","comparable":true}`, worker, cgroupPath, i)
+	started := sampleBaseNs + int64(i)*1000
+	ended := started + 500
+	return fmt.Sprintf(`{"worker":%q,"cgroupPath":%q,"cgroupContained":true,"iteration":%d,"status":"success","outputMatches":true,"containmentMode":"isolated","comparable":true,"startedAtNs":%d,"endedAtNs":%d}`, worker, cgroupPath, i, started, ended)
+}
+
+// writeTimedSamples writes one successful sample per (start,end) pair so a test
+// can shape the per-worker active intervals directly.
+func writeTimedSamples(path, worker, cgroupPath string, spans [][2]int64) {
+	var b strings.Builder
+	for i, span := range spans {
+		fmt.Fprintf(&b, `{"worker":%q,"cgroupPath":%q,"cgroupContained":true,"iteration":%d,"status":"success","outputMatches":true,"containmentMode":"isolated","comparable":true,"startedAtNs":%d,"endedAtNs":%d}`+"\n", worker, cgroupPath, i, span[0], span[1])
+	}
+	_ = os.WriteFile(path, []byte(b.String()), 0o644)
 }
 
 func writeSamples(path, worker, cgroupPath string, n int) {
@@ -369,6 +386,79 @@ func TestRunBlockHappyPath(t *testing.T) {
 	}
 	if !sink.has("readiness-barrier:passed") {
 		t.Fatalf("checks = %v", sink.checks)
+	}
+}
+
+func TestRunBlockRecordsValidSteadyWindow(t *testing.T) {
+	req, fc, fl, sink := baseRequest(t)
+	fl.onRun = func(spec WorkerSpec, cg string) { writeContained(spec, cg) }
+
+	res, err := coordinator(fc, fl, sink).Run(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Two samples per worker: starts base+0/base+1000, ends base+500/base+1500.
+	wantStart := sampleBaseNs
+	wantEnd := sampleBaseNs + 1500
+	if res.Receipt.SteadyWindowStartNs != wantStart || res.Receipt.SteadyWindowEndNs != wantEnd {
+		t.Fatalf("window = [%d,%d], want [%d,%d]", res.Receipt.SteadyWindowStartNs, res.Receipt.SteadyWindowEndNs, wantStart, wantEnd)
+	}
+	if got, want := res.Receipt.SteadyWindowSeconds, 1500.0/1e9; math.Abs(got-want) > 1e-12 {
+		t.Fatalf("steadyWindowSeconds = %v, want %v", got, want)
+	}
+	if !sink.has("steady-window:passed") {
+		t.Fatalf("checks = %v", sink.checks)
+	}
+}
+
+func TestRunBlockRejectsUnusableSteadyWindow(t *testing.T) {
+	cases := []struct {
+		name  string
+		spans [][][2]int64 // per worker
+	}{
+		{
+			name:  "missing timestamps",
+			spans: [][][2]int64{{{0, 0}}, {{0, 0}}},
+		},
+		{
+			name: "disjoint intervals leave an empty window",
+			spans: [][][2]int64{
+				{{sampleBaseNs, sampleBaseNs + 1000}},
+				{{sampleBaseNs + 5000, sampleBaseNs + 6000}},
+			},
+		},
+		{
+			name: "negligible window over a long span",
+			spans: [][][2]int64{
+				{{sampleBaseNs, sampleBaseNs + 10}, {sampleBaseNs + 10_000, sampleBaseNs + 10_010}},
+				{{sampleBaseNs + 5000, sampleBaseNs + 5001}},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req, fc, fl, sink := baseRequest(t)
+			for i := range req.Workers {
+				req.Workers[i].ExpectedSamples = len(tc.spans[i])
+			}
+			fl.onRun = func(spec WorkerSpec, cg string) {
+				index := 0
+				for i := range req.Workers {
+					if req.Workers[i].ID == spec.ID {
+						index = i
+					}
+				}
+				writeTimedSamples(spec.OutputPath, spec.ID, cg, tc.spans[index])
+			}
+
+			_, err := coordinator(fc, fl, sink).Run(context.Background(), req)
+			if err == nil || !strings.Contains(err.Error(), req.BlockID) || !strings.Contains(err.Error(), "measurement window") {
+				t.Fatalf("err = %v, want steady-window rejection naming block %s", err, req.BlockID)
+			}
+			if !sink.has("sample-count:failed") {
+				t.Fatalf("checks = %v", sink.checks)
+			}
+		})
 	}
 }
 

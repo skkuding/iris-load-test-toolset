@@ -120,20 +120,26 @@ type sample struct {
 	CPUTimeMs           int     `json:"cpuTimeMs"`
 	RealTimeMs          int     `json:"realTimeMs"`
 	ControllerElapsedMs float64 `json:"controllerElapsedMs"`
-	MemoryBytes         int64   `json:"memoryBytes"`
-	Signal              int     `json:"signal"`
-	ExitCode            int     `json:"exitCode"`
-	ErrorCode           int     `json:"errorCode"`
-	ResultCode          int     `json:"resultCode"`
-	CgroupPath          string  `json:"cgroupPath,omitempty"`
-	CgroupContained     bool    `json:"cgroupContained"`
-	JudgerSHA256        string  `json:"judgerSha256,omitempty"`
-	OutputSHA256        string  `json:"outputSha256,omitempty"`
-	OutputBytes         int64   `json:"outputBytes,omitempty"`
-	OutputMatches       bool    `json:"outputMatches"`
-	ContainmentMode     string  `json:"containmentMode"`
-	Comparable          bool    `json:"comparable"`
-	Error               string  `json:"error,omitempty"`
+	// StartedAtNs and EndedAtNs are host-wide wall-clock timestamps recorded
+	// immediately before and after each execute-mode Judger invocation. They
+	// let the coordinator and analyzers isolate the all-workers-active steady
+	// window. Compile samples leave them zero.
+	StartedAtNs     int64  `json:"startedAtNs"`
+	EndedAtNs       int64  `json:"endedAtNs"`
+	MemoryBytes     int64  `json:"memoryBytes"`
+	Signal          int    `json:"signal"`
+	ExitCode        int    `json:"exitCode"`
+	ErrorCode       int    `json:"errorCode"`
+	ResultCode      int    `json:"resultCode"`
+	CgroupPath      string `json:"cgroupPath,omitempty"`
+	CgroupContained bool   `json:"cgroupContained"`
+	JudgerSHA256    string `json:"judgerSha256,omitempty"`
+	OutputSHA256    string `json:"outputSha256,omitempty"`
+	OutputBytes     int64  `json:"outputBytes,omitempty"`
+	OutputMatches   bool   `json:"outputMatches"`
+	ContainmentMode string `json:"containmentMode"`
+	Comparable      bool   `json:"comparable"`
+	Error           string `json:"error,omitempty"`
 }
 
 // judgerResult is the authoritative alpha.4 JSON document. Every field the task
@@ -300,9 +306,13 @@ func runExecute(ctx context.Context, opt options) ([]sample, error) {
 		logPath := filepath.Join(workDir, fmt.Sprintf("iter-%06d.judger.log", i))
 
 		args := buildJudgerArgs(opt, bin, inputPath, outPath, errPath, logPath, uid, gid)
+		startedAtNs := time.Now().UnixNano()
 		jr := invokeJudger(ctx, opt, args)
+		endedAtNs := time.Now().UnixNano()
 
 		s := opt.newExecuteSample(i, jr)
+		s.StartedAtNs = startedAtNs
+		s.EndedAtNs = endedAtNs
 		s.JudgerSHA256 = judgerSum
 		if jr.ok && jr.res.exitCode == 0 && !jr.res.timedOut {
 			if sum, size, herr := artifact.HashFile(outPath); herr == nil {
