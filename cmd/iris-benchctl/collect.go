@@ -7,14 +7,18 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	"github.com/skkuding/iris-load-test-toolset/internal/artifact"
 	"github.com/skkuding/iris-load-test-toolset/internal/config"
 	"github.com/skkuding/iris-load-test-toolset/internal/manifest"
+	"github.com/skkuding/iris-load-test-toolset/internal/qualification"
 	"github.com/skkuding/iris-load-test-toolset/internal/runplan"
+	"github.com/skkuding/iris-load-test-toolset/internal/telemetry"
 )
 
 // sshDownloader is the file-transfer boundary used by collect.
@@ -105,33 +109,47 @@ func collectRun(ctx context.Context, cfg config.Config, host, remoteRoot, runID 
 	if err != nil {
 		return err
 	}
+	if m.RunID != runID {
+		return fmt.Errorf("collected plan run id %s does not match requested %s", m.RunID, runID)
+	}
 	m.AddOutcome("artifact-completeness", "passed", fmt.Sprintf("%d listed file(s)", len(inv.Entries)))
 	m.AddOutcome("secret-scan", "passed", "")
+	m.AddOutcome("run-validation", "passed", "all planned blocks and samples validated")
+	m.AddOutcome("telemetry", "passed", "per-block thermal/throttling telemetry validated")
+	m.AddOutcome("cleanup", "passed", "runtime cleanup recorded before bundle")
 	if err := m.SecretsAbsent(nil); err != nil {
 		return err
 	}
 	if err := m.WriteAtomic(filepath.Join(bundleDir, "manifest.json")); err != nil {
 		return fmt.Errorf("write manifest: %w", err)
 	}
-	if err := writeChecksums(bundleDir, inv); err != nil {
-		return err
-	}
 	marker := map[string]any{
 		"runId":         runID,
 		"entries":       len(inv.Entries),
 		"schemaVersion": inv.SchemaVersion,
 		"verified":      true,
+		"accepted":      true,
+		"comparable":    m.Comparable,
 	}
 	if err := artifact.WriteJSONAtomic(filepath.Join(bundleDir, "collection.json"), marker, 0o644); err != nil {
 		return err
 	}
+	qualified := qualificationPassed(m)
 	complete := map[string]any{
 		"runId":       runID,
 		"planSha256":  m.PlanSHA256,
 		"collectedAt": time.Now().UTC(),
 		"entries":     len(inv.Entries),
+		"accepted":    true,
+		"comparable":  m.Comparable,
+		"validated":   true,
+		"qualified":   qualified,
+		"cleaned":     true,
 	}
 	if err := artifact.WriteJSONAtomic(filepath.Join(bundleDir, "COMPLETE"), complete, 0o644); err != nil {
+		return err
+	}
+	if err := writeChecksums(bundleDir); err != nil {
 		return err
 	}
 	if err := os.Rename(bundleDir, finalDir); err != nil {
@@ -163,14 +181,51 @@ func buildCollectManifest(bundleDir string) (manifest.Manifest, error) {
 	if recorded := readRecordedPlanSHA(bundleDir); recorded != "" && recorded != digest {
 		return manifest.Manifest{}, fmt.Errorf("collected plan digest %s does not match agent record %s", digest, recorded)
 	}
+	if err := requireAcceptanceRecords(bundleDir, plan.RunID, digest); err != nil {
+		return manifest.Manifest{}, err
+	}
 	commit, dirty := buildGitInfo()
-	return manifest.Build(plan, digest, readAgentVersion(bundleDir), commit, dirty, time.Now())
+	m, err := manifest.Build(plan, digest, readAgentVersion(bundleDir), commit, dirty, time.Now())
+	if err != nil {
+		return manifest.Manifest{}, err
+	}
+	m.ContainmentMode = plan.ContainmentMode
+	if plan.Qualification.Report == nil {
+		m.AddOutcome("qualification", "unsupported", "no sealed Ansible qualification report; accepted but non-comparable")
+	} else {
+		path := filepath.Join(bundleDir, "qualification", "ansible-report.json")
+		if err := qualification.Validate(path, plan); err != nil {
+			return manifest.Manifest{}, err
+		}
+		m.AddOutcome("qualification", "passed", "sealed host qualification report revalidated")
+	}
+	facts, err := os.ReadFile(filepath.Join(bundleDir, "qualification", "host-facts.json"))
+	if err != nil {
+		return manifest.Manifest{}, fmt.Errorf("read qualification facts: %w", err)
+	}
+	if err := json.Unmarshal(facts, &m.HostFacts); err != nil {
+		return manifest.Manifest{}, fmt.Errorf("parse qualification facts: %w", err)
+	}
+	blockIDs := make([]string, 0, len(plan.Blocks))
+	for _, block := range plan.Blocks {
+		blockIDs = append(blockIDs, block.ID)
+	}
+	assessment := telemetry.AssessBlocks(bundleDir, blockIDs)
+	if !assessment.Valid {
+		return manifest.Manifest{}, fmt.Errorf("telemetry validation failed: %s", strings.Join(assessment.Reasons, "; "))
+	}
+	if !assessment.Comparable {
+		m.MarkOverride(strings.Join(assessment.Reasons, "; "))
+	}
+	return m, nil
 }
 
 // agentRecord is the subset of an agent phase record collect needs.
 type agentRecord struct {
 	AgentVersion string `json:"agentVersion"`
 	PlanSHA256   string `json:"planSha256"`
+	RunID        string `json:"runId"`
+	Action       string `json:"action"`
 }
 
 // readAgentVersion reads the agent version from the prepared record. It is
@@ -207,6 +262,23 @@ func readAgentRecord(bundleDir string) (agentRecord, bool) {
 	return agentRecord{}, false
 }
 
+func requireAcceptanceRecords(bundleDir, runID, planSHA string) error {
+	for _, action := range []string{"qualified", "validated", "cleaned"} {
+		data, err := os.ReadFile(filepath.Join(bundleDir, action+".json"))
+		if err != nil {
+			return fmt.Errorf("acceptance record %s: %w", action, err)
+		}
+		var rec agentRecord
+		if err := json.Unmarshal(data, &rec); err != nil {
+			return fmt.Errorf("acceptance record %s: %w", action, err)
+		}
+		if rec.RunID != runID || rec.PlanSHA256 != planSHA || rec.Action != action {
+			return fmt.Errorf("acceptance record %s does not match run and plan", action)
+		}
+	}
+	return nil
+}
+
 // buildGitInfo reports the VCS revision and dirty state of the controller
 // build, when the Go toolchain recorded it.
 func buildGitInfo() (string, bool) {
@@ -224,13 +296,41 @@ func buildGitInfo() (string, bool) {
 			dirty = s.Value == "true"
 		}
 	}
+	// Linked worktrees and some local Go toolchains omit vcs.* build settings.
+	// Fall back to the repository that collect is running from so the manifest
+	// never silently represents an uncommitted benchmark build as clean.
+	if commit == "" {
+		if out, err := exec.Command("git", "rev-parse", "HEAD").Output(); err == nil {
+			commit = strings.TrimSpace(string(out))
+		}
+		if out, err := exec.Command("git", "status", "--porcelain", "--untracked-files=normal").Output(); err == nil {
+			dirty = len(bytes.TrimSpace(out)) > 0
+		}
+	}
 	return commit, dirty
 }
 
-// writeChecksums writes the standard sha256 manifest for the listed files.
-func writeChecksums(bundleDir string, inv artifact.Inventory) error {
+func qualificationPassed(m manifest.Manifest) bool {
+	for _, outcome := range m.Outcomes {
+		if outcome.Name == "qualification" {
+			return outcome.Status == "passed"
+		}
+	}
+	return false
+}
+
+// writeChecksums covers every regular bundle file, including COMPLETE, except
+// checksums.sha256 itself. Excluding the checksum file avoids recursion.
+func writeChecksums(bundleDir string) error {
+	inv, err := artifact.BuildInventory(bundleDir)
+	if err != nil {
+		return err
+	}
 	var buf bytes.Buffer
 	for _, e := range inv.Entries {
+		if e.Path == "checksums.sha256" {
+			continue
+		}
 		fmt.Fprintf(&buf, "%s  %s\n", e.SHA256, e.Path)
 	}
 	return artifact.WriteFileAtomic(filepath.Join(bundleDir, "checksums.sha256"), buf.Bytes(), 0o644)

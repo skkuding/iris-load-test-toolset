@@ -38,6 +38,9 @@ var (
 	ErrEscape = errors.New("containment: process escaped its cgroup")
 	// ErrInvalid means the containment request is malformed.
 	ErrInvalid = errors.New("containment: invalid containment request")
+	// ErrNotEmpty means a cgroup still holds member processes or child cgroups
+	// and therefore must not be removed.
+	ErrNotEmpty = errors.New("containment: cgroup is not empty")
 )
 
 // RequiredControllers are the controllers a delegated parent must expose.
@@ -130,6 +133,13 @@ type Handle interface {
 	Exists() (bool, error)
 }
 
+// Inspection is a read-only snapshot of one exact mount-relative cgroup.
+type Inspection struct {
+	Path    string
+	Exists  bool
+	Members []int
+}
+
 // Manager creates and validates cgroup subtrees.
 type Manager struct {
 	// Mount is the cgroup v2 unified mount. Empty means DefaultMount.
@@ -185,6 +195,244 @@ func (m *Manager) RelToMount(path string) (string, error) {
 	}
 	rel := strings.TrimPrefix(clean, mount)
 	return "/" + strings.TrimPrefix(rel, string(os.PathSeparator)), nil
+}
+
+// NormalizeMountRelative converts a cgroup path to the mount-relative form used
+// by /proc/<pid>/cgroup. It accepts either a path already relative to the
+// unified mount such as "/sandbox-x/box-1" or an absolute filesystem path below
+// mount such as "/sys/fs/cgroup/sandbox-x/box-1". It is purely lexical and does
+// not touch the filesystem. The second result is false when path is empty,
+// relative, the mount root, or otherwise unusable. A path below a different
+// prefix is treated as already mount-relative and left intact so callers can
+// still reject it by comparison.
+func NormalizeMountRelative(mount, path string) (string, bool) {
+	if path == "" {
+		return "", false
+	}
+	clean := filepath.Clean(path)
+	if !filepath.IsAbs(clean) {
+		return "", false
+	}
+	m := filepath.Clean(mount)
+	if clean == m {
+		return "", false
+	}
+	if strings.HasPrefix(clean, m+string(os.PathSeparator)) {
+		clean = strings.TrimPrefix(clean, m)
+	}
+	if clean == "/" || clean == "" {
+		return "", false
+	}
+	return "/" + strings.TrimPrefix(clean, string(os.PathSeparator)), true
+}
+
+// WithinMountRelative reports whether reported equals root or is a descendant
+// of root. Either argument may be a mount-relative cgroup path or an absolute
+// path below the cgroup mount, so both reported forms are accepted. Sibling
+// prefix confusion such as "/sandbox-a-evil" against "/sandbox-a" is rejected.
+func WithinMountRelative(mount, root, reported string) bool {
+	r, ok := NormalizeMountRelative(mount, root)
+	if !ok || r == "/" {
+		return false
+	}
+	c, ok := NormalizeMountRelative(mount, reported)
+	if !ok {
+		return false
+	}
+	return c == r || strings.HasPrefix(c, r+"/")
+}
+
+// InspectCgroup reports whether one exact mount-relative cgroup and any direct
+// members remain. It never removes or otherwise mutates the inspected cgroup.
+func (m *Manager) InspectCgroup(cgroupPath string) (Inspection, error) {
+	clean := filepath.Clean(cgroupPath)
+	if !filepath.IsAbs(cgroupPath) || clean == "/" || clean != cgroupPath {
+		return Inspection{}, fmt.Errorf("%w: unsafe cgroup path %q", ErrInvalid, cgroupPath)
+	}
+	full := filepath.Join(m.mount(), strings.TrimPrefix(clean, "/"))
+	info, err := m.fs().Stat(full)
+	if errors.Is(err, fs.ErrNotExist) {
+		return Inspection{Path: clean}, nil
+	}
+	if err != nil {
+		return Inspection{}, fmt.Errorf("containment: inspect %s: %w", clean, err)
+	}
+	if !info.IsDir() {
+		return Inspection{}, fmt.Errorf("containment: cgroup %s is not a directory", clean)
+	}
+	data, err := m.fs().ReadFile(filepath.Join(full, "cgroup.procs"))
+	if err != nil {
+		return Inspection{}, fmt.Errorf("containment: read members of %s: %w", clean, err)
+	}
+	members, err := parseMembers(data, clean)
+	if err != nil {
+		return Inspection{}, err
+	}
+	return Inspection{Path: clean, Exists: true, Members: members}, nil
+}
+
+// ValidateSandboxRemovalPaths is the read-only proof used before removing a
+// run-scoped production-compat sandbox root and the empty "box-<safe-id>"
+// child cgroups that live alpha.4 leaves under it, one per iteration.
+//
+// It accepts only the exact direct mount-root name "sandbox-<id>" with a single
+// safe id component. A present root must be a directory whose cgroup.procs is
+// empty. Every direct child directory must be named "box-<safe-id>", must have
+// an empty cgroup.procs, and must have no child cgroup of its own
+// ("grandchild"). Any member process, deeper child, unsafe name, or unexpected
+// directory refuses the whole removal via ErrNotEmpty or ErrInvalid and leaves
+// the cgroup untouched so its evidence is preserved. It never removes or
+// otherwise mutates the inspected cgroups.
+//
+// The returned slice holds canonical full filesystem paths in removal order:
+// every validated box child first (sorted by name), then the root last. A root
+// that does not exist returns (nil, nil).
+func (m *Manager) ValidateSandboxRemovalPaths(cgroupPath string) ([]string, error) {
+	name, err := validateSandboxRootPath(cgroupPath)
+	if err != nil {
+		return nil, err
+	}
+	full := filepath.Join(m.mount(), name)
+
+	info, err := m.fs().Stat(full)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("containment: stat sandbox root %s: %w", cgroupPath, err)
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("%w: sandbox root %s is not a directory", ErrInvalid, cgroupPath)
+	}
+	if err := m.requireEmptyProcs(cgroupPath); err != nil {
+		return nil, err
+	}
+	entries, err := m.fs().ReadDir(full)
+	if err != nil {
+		return nil, fmt.Errorf("containment: list sandbox root %s: %w", cgroupPath, err)
+	}
+	var boxes []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			if strings.HasPrefix(e.Name(), "box-") {
+				return nil, fmt.Errorf("%w: sandbox root %s has unexpected non-directory %q", ErrInvalid, cgroupPath, e.Name())
+			}
+			continue
+		}
+		if err := validateBoxName(e.Name()); err != nil {
+			return nil, fmt.Errorf("%w: sandbox root %s: %v", ErrInvalid, cgroupPath, err)
+		}
+		boxes = append(boxes, e.Name())
+	}
+	sort.Strings(boxes)
+	paths := make([]string, 0, len(boxes)+1)
+	for _, box := range boxes {
+		childRel := filepath.Join(cgroupPath, box)
+		if err := m.requireEmptyProcs(childRel); err != nil {
+			return nil, err
+		}
+		child := filepath.Join(full, box)
+		childEntries, err := m.fs().ReadDir(child)
+		if err != nil {
+			return nil, fmt.Errorf("containment: list sandbox box %s: %w", childRel, err)
+		}
+		for _, ge := range childEntries {
+			if ge.IsDir() {
+				return nil, fmt.Errorf("%w: sandbox box %s still has grandchild cgroup %q", ErrNotEmpty, childRel, ge.Name())
+			}
+		}
+		paths = append(paths, child)
+	}
+	return append(paths, full), nil
+}
+
+// requireEmptyProcs proves the mount-relative cgroup holds no member processes.
+func (m *Manager) requireEmptyProcs(cgroupPath string) error {
+	full := filepath.Join(m.mount(), strings.TrimPrefix(filepath.Clean(cgroupPath), "/"))
+	data, err := m.fs().ReadFile(filepath.Join(full, "cgroup.procs"))
+	if err != nil {
+		return fmt.Errorf("containment: read members of %s: %w", cgroupPath, err)
+	}
+	members, err := parseMembers(data, cgroupPath)
+	if err != nil {
+		return err
+	}
+	if len(members) > 0 {
+		return fmt.Errorf("%w: sandbox cgroup %s still has member pids %v", ErrNotEmpty, cgroupPath, members)
+	}
+	return nil
+}
+
+// RemoveEmptySandboxRoot removes a direct child of the cgroup mount named
+// "sandbox-<safe-id>" plus the empty "box-<safe-id>" children live alpha.4
+// leaves under it. It validates every path through ValidateSandboxRemovalPaths
+// first and then removes the canonical paths in child-first, root-last order, so
+// nothing is removed until every cgroup is proven to hold no member processes,
+// no grandchildren, and no unexpected directory names. A residual member,
+// deeper child, or unexpected child is reported via ErrNotEmpty or ErrInvalid
+// and every cgroup is left untouched so its evidence is preserved. A root that
+// is already absent is not an error.
+func (m *Manager) RemoveEmptySandboxRoot(cgroupPath string) error {
+	paths, err := m.ValidateSandboxRemovalPaths(cgroupPath)
+	if err != nil {
+		return err
+	}
+	for _, path := range paths {
+		if err := m.fs().Remove(path); err != nil {
+			return fmt.Errorf("containment: remove sandbox cgroup %s: %w", path, err)
+		}
+	}
+	return nil
+}
+
+// validateBoxName accepts only a single safe "box-<id>" directory name.
+func validateBoxName(name string) error {
+	const prefix = "box-"
+	if !strings.HasPrefix(name, prefix) {
+		return fmt.Errorf("unexpected cgroup directory %q", name)
+	}
+	if !safeCgroupID(strings.TrimPrefix(name, prefix)) {
+		return fmt.Errorf("unsafe box id in %q", name)
+	}
+	return nil
+}
+
+// validateSandboxRootPath accepts only a clean, absolute, single-component path
+// named "sandbox-<safe-id>" directly below the cgroup mount root and returns
+// the mount-root directory name.
+func validateSandboxRootPath(cgroupPath string) (string, error) {
+	clean := filepath.Clean(cgroupPath)
+	if cgroupPath == "" || !filepath.IsAbs(cgroupPath) || clean != cgroupPath {
+		return "", fmt.Errorf("%w: unsafe sandbox root path %q", ErrInvalid, cgroupPath)
+	}
+	if filepath.Dir(clean) != string(os.PathSeparator) {
+		return "", fmt.Errorf("%w: sandbox root %q must be a direct child of the cgroup mount", ErrInvalid, cgroupPath)
+	}
+	name := filepath.Base(clean)
+	const prefix = "sandbox-"
+	if !strings.HasPrefix(name, prefix) {
+		return "", fmt.Errorf("%w: sandbox root %q must be named sandbox-<id>", ErrInvalid, cgroupPath)
+	}
+	if !safeCgroupID(strings.TrimPrefix(name, prefix)) {
+		return "", fmt.Errorf("%w: unsafe sandbox id in %q", ErrInvalid, cgroupPath)
+	}
+	return name, nil
+}
+
+// safeCgroupID reports whether id is a single safe cgroup path component with
+// no separators or relative-path components.
+func safeCgroupID(id string) bool {
+	if id == "" || id == "." || id == ".." {
+		return false
+	}
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // CheckDelegation verifies that parent is an existing, explicitly delegated
@@ -381,11 +629,15 @@ func (s *subtree) Members() ([]int, error) {
 	if err != nil {
 		return nil, fmt.Errorf("containment: read members of %s: %w", s.path, err)
 	}
+	return parseMembers(data, s.path)
+}
+
+func parseMembers(data []byte, path string) ([]int, error) {
 	var pids []int
 	for _, f := range strings.Fields(string(data)) {
 		pid, err := strconv.Atoi(f)
 		if err != nil {
-			return nil, fmt.Errorf("containment: bad pid %q in %s", f, s.path)
+			return nil, fmt.Errorf("containment: bad pid %q in %s", f, path)
 		}
 		pids = append(pids, pid)
 	}

@@ -1,8 +1,8 @@
 // Command iris-benchctl is the operator-facing controller. Each subcommand is
 // intentionally thin: it loads configuration, builds an immutable run plan,
-// and delegates to the orchestrator or transport. Provision, full suite
-// execution, and analysis are not implemented in the minimum viable core and
-// say so explicitly.
+// and delegates to the orchestrator or transport. Provision and full suite
+// execution are not implemented in the minimum viable core and say so
+// explicitly.
 package main
 
 import (
@@ -29,7 +29,9 @@ func main() {
 		err = cmdCollect(args[1:])
 	case "status":
 		err = cmdStatus(args[1:])
-	case "provision", "qualify", "analyze", "resume":
+	case "analyze":
+		err = cmdAnalyze(args[1:])
+	case "provision", "qualify", "resume":
 		err = notImplemented(args[0])
 	case "help", "-h", "--help":
 		usage()
@@ -52,9 +54,10 @@ Usage:
   iris-benchctl run     --config FILE --host ALIAS --profile NAME [flags]
   iris-benchctl collect --config FILE --host ALIAS --run RUNID [flags]
   iris-benchctl status  --config FILE --run RUNID [--host ALIAS]
+  iris-benchctl analyze --run RUN_DIRECTORY
 
-Implemented: plan, run (partial), collect, status.
-Not implemented in this build: provision, qualify, analyze, resume.
+Implemented: plan, run (partial), collect, status, analyze (direct suite).
+Not implemented in this build: provision, qualify, resume.
 `)
 }
 

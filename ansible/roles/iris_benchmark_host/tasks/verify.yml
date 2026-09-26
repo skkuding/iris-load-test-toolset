@@ -150,14 +150,14 @@
     label: "{{ item }}"
   when:
     - (item ~ '.service') in ansible_facts.services
-    - ansible_facts.services[item ~ '.service'].state != 'active'
+    - ansible_facts.services[item ~ '.service'].state not in ['active', 'running']
 
-- name: Verify | check delegated slice unit
+- name: Verify | check delegated user manager
   ansible.builtin.command:
     argv:
       - systemctl
       - show
-      - "{{ iris_bench_slice }}"
+      - "user@{{ iris_bench_operator_uid }}.service"
       - --property=Delegate
       - --value
   register: iris_bench_slice_delegate
@@ -180,8 +180,9 @@
       - /bin/sh
       - -c
       - >-
-        printf 'subtree_control=%s\n' "$(cat /sys/fs/cgroup/{{ iris_bench_slice }}/cgroup.subtree_control 2>/dev/null || echo MISSING)";
-        printf 'procs=%s\n' "$(cat /sys/fs/cgroup/{{ iris_bench_slice }}/cgroup.procs 2>/dev/null | wc -l)"
+        printf 'subtree_control=%s\n' "$(cat {{ iris_bench_delegated_cgroup_path }}/cgroup.subtree_control 2>/dev/null || echo MISSING)";
+        printf 'procs=%s\n' "$(cat {{ iris_bench_delegated_cgroup_path }}/cgroup.procs 2>/dev/null | wc -l)";
+        printf 'owner=%s\n' "$(stat -c %U {{ iris_bench_delegated_cgroup_path }} 2>/dev/null || echo MISSING)"
   register: iris_bench_slice_cgroup_raw
   changed_when: false
   check_mode: false
@@ -199,6 +200,11 @@
           | select('search', '^procs=')
           | map('regex_replace', '^procs=', '')
           | first | default('0', true)) | trim }}
+    iris_bench_slice_owner: >-
+      {{ (iris_bench_slice_cgroup_raw.stdout_lines | default([])
+          | select('search', '^owner=')
+          | map('regex_replace', '^owner=', '')
+          | first | default('MISSING', true)) | trim }}
 
 - name: Verify | accumulate missing containment controllers
   ansible.builtin.set_fact:
@@ -225,6 +231,12 @@
     iris_bench_verify_failures: >-
       {{ iris_bench_verify_failures + ['cgroup-slice-processes:' ~ (iris_bench_slice_procs | default('0'))] }}
   when: (iris_bench_slice_procs | default('0') | int) > 0
+
+- name: Verify | accumulate delegated cgroup ownership mismatch
+  ansible.builtin.set_fact:
+    iris_bench_verify_failures: >-
+      {{ iris_bench_verify_failures + ['cgroup-owner:' ~ (iris_bench_slice_owner | default('MISSING'))] }}
+  when: iris_bench_slice_owner | default('MISSING') != iris_bench_operator_user
 
 # Global limits: read the manager's effective defaults rather than trusting the
 # [Manager] drop-in. This is the check that would have caught the wrong
@@ -347,13 +359,12 @@
   when: not (item.stat.exists | default(false))
 
 - name: Verify | check IRQ affinity drift (dry run)
-  ansible.builtin.command:
-    argv:
-      - "{{ iris_bench_python }}"
-      - "{{ role_path }}/files/iris_bench_set_irq_affinity.py"
-      - "--cpus"
-      - "{{ iris_bench_topology.housekeeping_cpus | join(',') }}"
-      - "--dry-run"
+  ansible.builtin.script:
+    cmd: >-
+      {{ role_path }}/files/iris_bench_set_irq_affinity.py
+      --cpus {{ iris_bench_topology.housekeeping_cpus | join(',') }}
+      --dry-run
+    executable: "{{ iris_bench_python }}"
   register: iris_bench_irq_drift
   changed_when: false
   check_mode: false

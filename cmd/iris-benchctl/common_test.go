@@ -28,12 +28,16 @@ func testConfig(t *testing.T) config.Config {
 
 func baseOptions() planOptions {
 	return planOptions{
-		host:         "codedang8",
-		profile:      "isolated-1s",
-		runID:        "iris-20260925-abcdefgh",
-		irisDigest:   "sha256:" + strings.Repeat("b", 64),
-		judgerDigest: strings.Repeat("c", 64),
-		seed:         7,
+		host:            "codedang8",
+		profile:         "isolated-1s",
+		runID:           "iris-20260925-abcdefgh",
+		irisDigest:      "sha256:" + strings.Repeat("b", 64),
+		judgerDigest:    strings.Repeat("c", 64),
+		benchBinary:     "/tmp/precompiled-workload",
+		benchBinarySHA:  strings.Repeat("d", 64),
+		seed:            7,
+		fixtures:        stringList{"cpp-runtime-v1=../../fixtures/568/15850.in"},
+		expectedOutputs: stringList{"cpp-runtime-v1=../../fixtures/568/15850.out"},
 	}
 }
 
@@ -54,6 +58,9 @@ func TestBuildPlanOffline(t *testing.T) {
 	}
 	if plan.JudgerDigest != "sha256:"+strings.Repeat("c", 64) {
 		t.Fatalf("judger digest = %q", plan.JudgerDigest)
+	}
+	if plan.Qualification.MaxLoad1 != 1.0 {
+		t.Fatalf("sealed maxLoad1 = %v, want 1.0", plan.Qualification.MaxLoad1)
 	}
 	if _, ok := plan.Images["rabbitmq"]; !ok {
 		t.Fatal("rabbitmq image not carried into plan")
@@ -88,6 +95,37 @@ func TestBuildPlanRequiresJudgerDigest(t *testing.T) {
 	}
 }
 
+func TestBuildPlanSealsBenchmarkImage(t *testing.T) {
+	o := baseOptions()
+	o.benchmarkImage = "sha256:" + strings.Repeat("e", 64)
+	plan, _, err := o.buildPlan(context.Background(), testConfig(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	image := plan.Images["judger-bench"]
+	if image.Reference != o.benchmarkImage || image.Digest != o.benchmarkImage {
+		t.Fatalf("sealed benchmark image = %+v", image)
+	}
+}
+
+func TestBuildPlanBenchmarkImageMustBeExactLocalID(t *testing.T) {
+	for _, image := range []string{"judger-bench:latest", strings.Repeat("e", 64), "sha256:" + strings.Repeat("E", 64)} {
+		o := baseOptions()
+		o.benchmarkImage = image
+		if _, _, err := o.buildPlan(context.Background(), testConfig(t)); err == nil || !strings.Contains(err.Error(), "--benchmark-image") {
+			t.Fatalf("image %q error = %v", image, err)
+		}
+	}
+}
+
+func TestBuildPlanProductionCompatRequiresOCI(t *testing.T) {
+	o := baseOptions()
+	o.productionCompat = true
+	if _, _, err := o.buildPlan(context.Background(), testConfig(t)); err == nil || !strings.Contains(err.Error(), "requires --benchmark-image") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestBuildPlanRejectsUnknownHost(t *testing.T) {
 	o := baseOptions()
 	o.host = "production-k8s"
@@ -105,6 +143,11 @@ func TestBuildPlanHashesFixtures(t *testing.T) {
 	}
 	o := baseOptions()
 	o.fixtures = stringList{"cpp-runtime-v1=" + path}
+	expected := filepath.Join(dir, "expected.txt")
+	if err := os.WriteFile(expected, []byte("ok\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	o.expectedOutputs = stringList{"cpp-runtime-v1=" + expected}
 	plan, _, err := o.buildPlan(context.Background(), testConfig(t))
 	if err != nil {
 		t.Fatal(err)
@@ -117,6 +160,7 @@ func TestBuildPlanHashesFixtures(t *testing.T) {
 func TestBuildPlanBadFixtureSpec(t *testing.T) {
 	o := baseOptions()
 	o.fixtures = stringList{"missing-equals"}
+	o.expectedOutputs = nil
 	_, _, err := o.buildPlan(context.Background(), testConfig(t))
 	if err == nil {
 		t.Fatal("accepted a malformed fixture spec")
@@ -135,7 +179,7 @@ func TestNewOpID(t *testing.T) {
 }
 
 func TestNotImplemented(t *testing.T) {
-	for _, name := range []string{"provision", "qualify", "analyze", "resume"} {
+	for _, name := range []string{"provision", "qualify", "resume"} {
 		if err := notImplemented(name); err == nil || !strings.Contains(err.Error(), "not implemented") {
 			t.Fatalf("%s: err = %v", name, err)
 		}

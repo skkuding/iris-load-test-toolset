@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -29,6 +30,11 @@ const SchemaVersion = 1
 // It is a mutable tag and must be resolved to a digest before execution.
 const DefaultIrisImage = "ghcr.io/skkuding/codedang-iris:stage"
 
+const (
+	ContainmentIsolated         = "isolated"
+	ContainmentProductionCompat = "production-compat"
+)
+
 // Target identifies the benchmark host.
 type Target struct {
 	SSHAlias      string `json:"sshAlias"`
@@ -36,8 +42,8 @@ type Target struct {
 	HostKeySHA256 string `json:"hostKeySha256,omitempty"`
 }
 
-// Image is a container image reference with an optional resolved manifest
-// digest of the form "sha256:<64 hex>".
+// Image is a container image reference with an optional resolved manifest or
+// local image digest of the form "sha256:<64 hex>".
 type Image struct {
 	Reference string `json:"reference"`
 	Digest    string `json:"digest,omitempty"`
@@ -45,7 +51,15 @@ type Image struct {
 
 // Fixture is a checksummed benchmark input.
 type Fixture struct {
-	Name   string `json:"name"`
+	Name                 string `json:"name"`
+	Path                 string `json:"path"`
+	SHA256               string `json:"sha256"`
+	ExpectedOutputPath   string `json:"expectedOutputPath"`
+	ExpectedOutputSHA256 string `json:"expectedOutputSha256"`
+}
+
+// StagedFile is an immutable remote file dependency.
+type StagedFile struct {
 	Path   string `json:"path"`
 	SHA256 string `json:"sha256"`
 }
@@ -63,11 +77,12 @@ type Block struct {
 
 // Qualification describes the required host facts and thresholds.
 type Qualification struct {
-	RequiredFacts    []string `json:"requiredFacts,omitempty"`
-	MinPhysicalCores int      `json:"minPhysicalCores,omitempty"`
-	RequireCgroupV2  bool     `json:"requireCgroupV2,omitempty"`
-	MaxLoad1         float64  `json:"maxLoad1,omitempty"`
-	MaxRunSeconds    int      `json:"maxRunSeconds,omitempty"`
+	RequiredFacts    []string    `json:"requiredFacts,omitempty"`
+	MinPhysicalCores int         `json:"minPhysicalCores,omitempty"`
+	RequireCgroupV2  bool        `json:"requireCgroupV2,omitempty"`
+	MaxLoad1         float64     `json:"maxLoad1,omitempty"`
+	MaxRunSeconds    int         `json:"maxRunSeconds,omitempty"`
+	Report           *StagedFile `json:"report,omitempty"`
 }
 
 // Expected declares the counts later validation must confirm.
@@ -96,6 +111,8 @@ type Plan struct {
 	Blocks                    []Block          `json:"blocks"`
 	Images                    map[string]Image `json:"images"`
 	JudgerDigest              string           `json:"judgerDigest,omitempty"`
+	WorkloadBinary            StagedFile       `json:"workloadBinary"`
+	ContainmentMode           string           `json:"containmentMode"`
 	RabbitMQDefinitionsDigest string           `json:"rabbitmqDefinitionsDigest,omitempty"`
 	RDSGeneration             string           `json:"rdsGeneration,omitempty"`
 	S3ObjectSet               string           `json:"s3ObjectSet,omitempty"`
@@ -116,6 +133,8 @@ type BuildInput struct {
 	Blocks                    []Block
 	Images                    map[string]Image
 	JudgerDigest              string
+	WorkloadBinary            StagedFile
+	ContainmentMode           string
 	RabbitMQDefinitionsDigest string
 	RDSGeneration             string
 	S3ObjectSet               string
@@ -139,6 +158,8 @@ func Build(in BuildInput) (Plan, error) {
 		Blocks:                    append([]Block(nil), in.Blocks...),
 		Images:                    map[string]Image{},
 		JudgerDigest:              in.JudgerDigest,
+		WorkloadBinary:            in.WorkloadBinary,
+		ContainmentMode:           in.ContainmentMode,
 		RabbitMQDefinitionsDigest: in.RabbitMQDefinitionsDigest,
 		RDSGeneration:             in.RDSGeneration,
 		S3ObjectSet:               in.S3ObjectSet,
@@ -157,6 +178,9 @@ func Build(in BuildInput) (Plan, error) {
 	}
 	if p.Expected.Blocks == 0 {
 		p.Expected.Blocks = len(p.Blocks)
+	}
+	if p.ContainmentMode == "" {
+		p.ContainmentMode = ContainmentIsolated
 	}
 	if err := p.Validate(); err != nil {
 		return Plan{}, err
@@ -190,8 +214,17 @@ func (p Plan) Validate() error {
 	if p.Suite == "" {
 		return fmt.Errorf("runplan: suite is required")
 	}
+	if p.ContainmentMode != ContainmentIsolated && p.ContainmentMode != ContainmentProductionCompat {
+		return fmt.Errorf("runplan: invalid containment mode %q", p.ContainmentMode)
+	}
 	if len(p.Blocks) == 0 {
 		return fmt.Errorf("runplan: at least one block is required")
+	}
+	if p.Expected.Blocks != len(p.Blocks) {
+		return fmt.Errorf("runplan: expected blocks %d does not match plan blocks %d", p.Expected.Blocks, len(p.Blocks))
+	}
+	if p.Qualification.MaxLoad1 <= 0 {
+		return errors.New("runplan: qualification maxLoad1 must be positive")
 	}
 	seen := make(map[string]struct{}, len(p.Blocks))
 	for i, b := range p.Blocks {
@@ -221,18 +254,43 @@ func (p Plan) Validate() error {
 			return fmt.Errorf("runplan: invalid %s digest %q", name, img.Digest)
 		}
 	}
+	if img, ok := p.Images["judger-bench"]; ok {
+		if !ValidImageDigest(img.Reference) || img.Digest != img.Reference {
+			return errors.New("runplan: judger-bench image must be an immutable local image ID sealed as matching reference and digest")
+		}
+	}
+	if p.ContainmentMode == ContainmentProductionCompat {
+		if _, ok := p.Images["judger-bench"]; !ok {
+			return errors.New("runplan: production-compat requires a judger-bench OCI image")
+		}
+	}
 	for _, f := range p.Fixtures {
-		if f.Name == "" || f.Path == "" {
-			return errors.New("runplan: fixture name and path are required")
+		if f.Name == "" || f.Path == "" || f.ExpectedOutputPath == "" {
+			return errors.New("runplan: fixture name, input path, and expected output path are required")
 		}
 		if !artifact.ValidSHA256(f.SHA256) {
 			return fmt.Errorf("runplan: fixture %q has invalid sha256", f.Name)
 		}
+		if !artifact.ValidSHA256(f.ExpectedOutputSHA256) {
+			return fmt.Errorf("runplan: fixture %q has invalid expected output sha256", f.Name)
+		}
+	}
+	if p.Suite == "judger" {
+		if !validStagedFile(p.WorkloadBinary) {
+			return errors.New("runplan: direct judger workload binary path and sha256 are required")
+		}
+	}
+	if p.Qualification.Report != nil && (!validStagedFile(*p.Qualification.Report) || !strings.HasPrefix(p.Qualification.Report.Path, "/tmp/")) {
+		return errors.New("runplan: qualification report path and sha256 are invalid")
 	}
 	if p.JudgerDigest != "" && !artifact.ValidSHA256(strings.TrimPrefix(p.JudgerDigest, "sha256:")) {
 		return fmt.Errorf("runplan: invalid judger digest %q", p.JudgerDigest)
 	}
 	return nil
+}
+
+func validStagedFile(f StagedFile) bool {
+	return filepath.IsAbs(f.Path) && artifact.ValidSHA256(f.SHA256)
 }
 
 // ValidateRunnable requires the resolved digests that execution depends on.
@@ -246,6 +304,9 @@ func (p Plan) ValidateRunnable() error {
 	}
 	if p.JudgerDigest == "" {
 		return errors.New("runplan: judger digest is required before execution")
+	}
+	if p.Suite == "judger" && len(p.Fixtures) != 1 {
+		return errors.New("runplan: direct judger execution requires exactly one input/expected-output fixture pair")
 	}
 	return nil
 }

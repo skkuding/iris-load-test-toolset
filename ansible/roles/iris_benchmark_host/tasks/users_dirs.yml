@@ -17,6 +17,13 @@
     comment: "Iris runtime benchmark agent"
     state: present
 
+- name: Identity | grant benchmark operator access to benchmark state
+  ansible.builtin.user:
+    name: "{{ iris_bench_operator_user }}"
+    groups:
+      - "{{ iris_bench_group }}"
+    append: true
+
 - name: Directories | create dedicated directories
   ansible.builtin.file:
     path: "{{ item.path }}"
@@ -44,18 +51,18 @@
     - path: "{{ iris_bench_state_dir }}"
       owner: "{{ iris_bench_user }}"
       group: "{{ iris_bench_group }}"
-      mode: "0750"
+      mode: "0770"
     - path: "{{ iris_bench_state_dir }}/runs"
       owner: "{{ iris_bench_user }}"
       group: "{{ iris_bench_group }}"
-      mode: "0750"
+      mode: "0770"
     # Create the tmpfs runtime directory now, not only through the tmpfiles
     # handler at flush time. iris-bench-cpu-policy.service runs earlier and its
     # ExecStart tees into this directory; missing it would fail the first run.
     - path: "{{ iris_bench_run_dir }}"
       owner: "{{ iris_bench_user }}"
       group: "{{ iris_bench_group }}"
-      mode: "0750"
+      mode: "0770"
   loop_control:
     label: "{{ item.path }}"
 
@@ -91,5 +98,5 @@
     content: |
       # Managed by the iris_benchmark_host Ansible role. /run is tmpfs-backed and
       # holds per-run runtime credentials, PIDs, sockets, and environment files.
-      d {{ iris_bench_run_dir }} 0750 {{ iris_bench_user }} {{ iris_bench_group }} -
+      d {{ iris_bench_run_dir }} 0770 {{ iris_bench_user }} {{ iris_bench_group }} -
   notify: Apply tmpfiles iris-bench

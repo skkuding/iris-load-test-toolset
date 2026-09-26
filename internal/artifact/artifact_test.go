@@ -82,6 +82,21 @@ func TestInventoryRejectsTraversal(t *testing.T) {
 	}
 }
 
+func TestVerifyCompleteRejectsSymlink(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "listed.txt"), "ok\n")
+	inv, err := BuildInventory(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("listed.txt", filepath.Join(root, "alias.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyComplete(root, inv); err == nil {
+		t.Fatal("VerifyComplete accepted an unlisted symlink")
+	}
+}
+
 func TestWriteFileAtomic(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "sub", "file.txt")

@@ -14,5 +14,6 @@ all:
       hosts:
         codedang8:
           benchmark_host: true
+          iris_bench_operator_user: skkuding
       vars:
         benchmark_host: false

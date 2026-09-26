@@ -16,6 +16,7 @@ fixtures/
 ├── 568/15850.in, 15850.out
 ├── 569/15852.in, 15852.out
 ├── 570/15873.in, 15873.out
+├── cpp-runtime-v1/       # deterministic direct-suite source/input/output
 └── tests/verify-fixtures.sh
 ```
 
@@ -48,3 +49,7 @@ tests/verify-fixtures.sh               # hashes, text, secrets
 
 `upload-fixtures.sh` uploads each manifest object individually with a SHA-256
 checksum and verifies the stored checksum with `head-object`.
+
+`cpp-runtime-v1` is a local direct-suite workload and is not uploaded as an
+Iris testcase object. Compile `source.cpp` with the production C++ flags and
+seal the resulting binary digest in the run plan.

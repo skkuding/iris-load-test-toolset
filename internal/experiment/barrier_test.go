@@ -25,12 +25,12 @@ func TestReadyBarrierGatesWorkersUntilRelease(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if _, err := readyFile.Write([]byte{1}); err != nil {
-				return
-			}
 			mu.Lock()
 			ready++
 			mu.Unlock()
+			if _, err := readyFile.Write([]byte{1}); err != nil {
+				return
+			}
 			buf := make([]byte, 1)
 			if _, err := io.ReadFull(release, buf); err != nil {
 				return

@@ -20,8 +20,10 @@ func samplePlan(t *testing.T) (runplan.Plan, string) {
 		Images: map[string]runplan.Image{
 			"iris": {Reference: runplan.DefaultIrisImage, Digest: "sha256:" + strings.Repeat("b", 64)},
 		},
-		JudgerDigest: "sha256:" + strings.Repeat("c", 64),
-		Blocks:       []runplan.Block{{ID: "isolated-1s-01", Suite: "judger", Profile: "isolated-1s", Workers: 1, Repetitions: 5}},
+		JudgerDigest:   "sha256:" + strings.Repeat("c", 64),
+		WorkloadBinary: runplan.StagedFile{Path: "/tmp/workload", SHA256: strings.Repeat("e", 64)},
+		Qualification:  runplan.Qualification{MaxLoad1: 1.0, Report: &runplan.StagedFile{Path: "/tmp/qualification.json", SHA256: strings.Repeat("f", 64)}},
+		Blocks:         []runplan.Block{{ID: "isolated-1s-01", Suite: "judger", Profile: "isolated-1s", Workers: 1, Repetitions: 5}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -73,6 +75,37 @@ func TestOverridesRequireNonComparable(t *testing.T) {
 	m.Comparable = true
 	if err := m.Validate(); err == nil {
 		t.Fatal("Validate accepted overrides with comparable=true")
+	}
+}
+
+func TestProductionCompatManifestIsNonComparable(t *testing.T) {
+	p, _ := samplePlan(t)
+	p.ContainmentMode = runplan.ContainmentProductionCompat
+	imageID := "sha256:" + strings.Repeat("f", 64)
+	p.Images["judger-bench"] = runplan.Image{Reference: imageID, Digest: imageID}
+	sha, err := p.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := Build(p, sha, "0.1.0", "", false, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Comparable || len(m.Overrides) != 1 {
+		t.Fatalf("production compatibility manifest = %+v", m)
+	}
+}
+
+func TestMissingQualificationReportIsNonComparable(t *testing.T) {
+	p, _ := samplePlan(t)
+	p.Qualification.Report = nil
+	sha, _ := p.Digest()
+	m, err := Build(p, sha, "0.1.0", "", false, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Comparable || len(m.Overrides) == 0 {
+		t.Fatalf("manifest without qualification report = %+v", m)
 	}
 }
 

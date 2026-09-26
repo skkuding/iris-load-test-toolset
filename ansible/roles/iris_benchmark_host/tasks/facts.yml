@@ -19,6 +19,21 @@
   ansible.builtin.set_fact:
     iris_bench_python: "{{ iris_bench_python_raw.stdout | default('/usr/bin/python3', true) | trim }}"
 
+- name: Facts | resolve benchmark operator uid
+  ansible.builtin.command:
+    argv:
+      - id
+      - -u
+      - "{{ iris_bench_operator_user }}"
+  register: iris_bench_operator_uid_raw
+  changed_when: false
+
+- name: Facts | publish delegated operator cgroup path
+  ansible.builtin.set_fact:
+    iris_bench_operator_uid: "{{ iris_bench_operator_uid_raw.stdout | trim }}"
+    iris_bench_delegated_cgroup_path: >-
+      /sys/fs/cgroup/user.slice/user-{{ iris_bench_operator_uid_raw.stdout | trim }}.slice/user@{{ iris_bench_operator_uid_raw.stdout | trim }}.service
+
 - name: Facts | read per-CPU topology (lscpu -e -J)
   ansible.builtin.command:
     argv:
@@ -117,6 +132,10 @@
       - "{{ iris_bench_benchmark_cpus }}"
     stdin: "{{ iris_bench_lscpu_raw.stdout | default('', true) }}"
   register: iris_bench_topology_raw
+  # role_path is controller-local. Derive from the target's captured lscpu JSON
+  # without assuming the repository is also checked out on the benchmark host.
+  delegate_to: localhost
+  become: false
   changed_when: false
   check_mode: false
   failed_when: false

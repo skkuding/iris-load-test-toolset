@@ -81,6 +81,15 @@ func writeExecutable(t *testing.T, path, body string) {
 	}
 }
 
+func expectedOutput(t *testing.T, dir string) string {
+	t.Helper()
+	p := filepath.Join(dir, "expected.out")
+	if err := os.WriteFile(p, []byte("judger-stdout\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
 func TestCompileUsesProductionFlagsAndRecordsDigest(t *testing.T) {
 	work := t.TempDir()
 	source := filepath.Join(work, "source.cpp")
@@ -151,6 +160,7 @@ func TestExecuteInvokesJudgerAndValidatesCgroup(t *testing.T) {
 		Binary:               bin,
 		Input:                input,
 		WorkDir:              work,
+		ExpectedOutput:       expectedOutput(t, work),
 		Iterations:           2,
 		JudgerPath:           judger,
 		ContainerID:          "abc",
@@ -217,6 +227,7 @@ func TestExecutePassesExplicitArguments(t *testing.T) {
 		Binary:               bin,
 		Input:                input,
 		WorkDir:              work,
+		ExpectedOutput:       expectedOutput(t, work),
 		Iterations:           1,
 		JudgerPath:           judger,
 		ContainerID:          "abc",
@@ -289,6 +300,7 @@ func TestExecuteCgroupEscapeIsRejected(t *testing.T) {
 		BlockID:              "b",
 		Binary:               bin,
 		WorkDir:              work,
+		ExpectedOutput:       expectedOutput(t, work),
 		Iterations:           1,
 		JudgerPath:           judger,
 		ContainerID:          "escaped",
@@ -306,6 +318,136 @@ func TestExecuteCgroupEscapeIsRejected(t *testing.T) {
 	}
 }
 
+func TestExecuteProductionCompatAcceptsRunSandboxDescendantAndMarksNonComparable(t *testing.T) {
+	work := t.TempDir()
+	bin := filepath.Join(work, defaultBinaryName)
+	writeExecutable(t, bin, "#!/bin/sh\nexit 0\n")
+	record := filepath.Join(work, "judger-args.txt")
+	judger := writeFakeJudger(t, work, record, judgerJSON("/sandbox-abc/box-123", 0, 0))
+	samples, err := runBench(context.Background(), options{
+		Mode: modeExecute, Binary: bin, WorkDir: work, ExpectedOutput: expectedOutput(t, work),
+		Iterations: 1, JudgerPath: judger, ContainerID: "abc",
+		ExpectedCgroupParent: "/sys/fs/cgroup/bench.slice", ProductionCompat: true, Timeout: 3 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := samples[0]
+	if s.Status != "success" || s.CgroupContained || s.Comparable || s.ContainmentMode != "production-compat" {
+		t.Fatalf("production compatibility sample = %+v", s)
+	}
+
+	wrong := writeFakeJudger(t, work, record, judgerJSON("/sandbox-other", 0, 0))
+	_, err = runBench(context.Background(), options{
+		Mode: modeExecute, Binary: bin, WorkDir: work, ExpectedOutput: expectedOutput(t, work),
+		Iterations: 1, JudgerPath: wrong, ContainerID: "abc",
+		ExpectedCgroupParent: "/sys/fs/cgroup/bench.slice", ProductionCompat: true, Timeout: 3 * time.Second,
+	})
+	if !errors.Is(err, errCgroupEscape) {
+		t.Fatalf("wrong root sandbox error = %v, want cgroup escape", err)
+	}
+}
+
+func TestExecuteProductionCompatAcceptsFilesystemPathForm(t *testing.T) {
+	work := t.TempDir()
+	bin := filepath.Join(work, defaultBinaryName)
+	writeExecutable(t, bin, "#!/bin/sh\nexit 0\n")
+	record := filepath.Join(work, "judger-args.txt")
+	// Live alpha.4 reports the full filesystem path while the monitor compares
+	// mount-relative paths.
+	judger := writeFakeJudger(t, work, record, judgerJSON("/sys/fs/cgroup/sandbox-abc/box-123", 0, 0))
+	samples, err := runBench(context.Background(), options{
+		Mode: modeExecute, Binary: bin, WorkDir: work, ExpectedOutput: expectedOutput(t, work),
+		Iterations: 1, JudgerPath: judger, ContainerID: "abc",
+		ExpectedCgroupParent: "/sys/fs/cgroup/bench.slice", ProductionCompat: true, Timeout: 3 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := samples[0]
+	if s.Status != "success" || s.CgroupContained || s.Comparable || s.ContainmentMode != "production-compat" {
+		t.Fatalf("production compatibility sample = %+v", s)
+	}
+}
+
+func TestProductionCompatAcceptsBothPathForms(t *testing.T) {
+	cases := []struct {
+		name string
+		got  string
+		ok   bool
+	}{
+		{"mount-relative-root", "/sandbox-abc", true},
+		{"mount-relative-descendant", "/sandbox-abc/box-123", true},
+		{"filesystem-root", "/sys/fs/cgroup/sandbox-abc", true},
+		{"filesystem-descendant", "/sys/fs/cgroup/sandbox-abc/box-123", true},
+		{"prefix-confusion-relative", "/sandbox-abc-evil/child", false},
+		{"prefix-confusion-filesystem", "/sys/fs/cgroup/sandbox-abc-evil/child", false},
+		{"unrelated", "/sandbox-other", false},
+		{"unrelated-filesystem", "/sys/fs/cgroup/other", false},
+		{"traversal", "/sys/fs/cgroup/sandbox-abc/../../etc", false},
+		{"relative", "sandbox-abc", false},
+		{"empty", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateProductionCgroup("abc", tc.got)
+			if tc.ok && err != nil {
+				t.Fatalf("validateProductionCgroup(%q) = %v", tc.got, err)
+			}
+			if !tc.ok && !errors.Is(err, errCgroupEscape) {
+				t.Fatalf("validateProductionCgroup(%q) = %v, want cgroup escape", tc.got, err)
+			}
+		})
+	}
+}
+
+func TestProductionCompatRejectsUnsafeContainerID(t *testing.T) {
+	for _, id := range []string{"", ".", "..", "../etc", "a/b"} {
+		if err := validateProductionCgroup(id, "/etc"); !errors.Is(err, errCgroupEscape) {
+			t.Fatalf("container id %q accepted: %v", id, err)
+		}
+	}
+}
+
+func TestOutputMismatchPreservesSpecificJudgerStatus(t *testing.T) {
+	work := t.TempDir()
+	bin := filepath.Join(work, defaultBinaryName)
+	writeExecutable(t, bin, "#!/bin/sh\nexit 0\n")
+	expected := filepath.Join(work, "different.out")
+	if err := os.WriteFile(expected, []byte("different\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	judger := writeFakeJudger(t, work, filepath.Join(work, "args.txt"), judgerJSON("/sys/fs/cgroup/bench.slice/sandbox-abc", 4, 0))
+	samples, err := runBench(context.Background(), options{
+		Mode: modeExecute, Binary: bin, WorkDir: work, ExpectedOutput: expected,
+		Iterations: 1, JudgerPath: judger, ContainerID: "abc",
+		ExpectedCgroupParent: "/sys/fs/cgroup/bench.slice", Timeout: 3 * time.Second,
+	})
+	if err == nil || samples[0].Status != "runtime_error" || samples[0].OutputMatches {
+		t.Fatalf("samples=%+v err=%v", samples, err)
+	}
+}
+
+func TestExecuteRejectsOutputMismatch(t *testing.T) {
+	work := t.TempDir()
+	bin := filepath.Join(work, defaultBinaryName)
+	writeExecutable(t, bin, "#!/bin/sh\nexit 0\n")
+	expected := filepath.Join(work, "different.out")
+	if err := os.WriteFile(expected, []byte("different\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	record := filepath.Join(work, "judger-args.txt")
+	judger := writeFakeJudger(t, work, record, judgerJSON("/sys/fs/cgroup/bench.slice/sandbox-abc", 0, 0))
+	samples, err := runBench(context.Background(), options{
+		Mode: modeExecute, Binary: bin, WorkDir: work, ExpectedOutput: expected,
+		Iterations: 1, JudgerPath: judger, ContainerID: "abc",
+		ExpectedCgroupParent: "/sys/fs/cgroup/bench.slice", Timeout: 3 * time.Second,
+	})
+	if err == nil || samples[0].Status != "wrong_answer" || samples[0].OutputMatches {
+		t.Fatalf("output mismatch samples=%+v err=%v", samples, err)
+	}
+}
+
 func TestExecuteRejectsMalformedJudgerJSON(t *testing.T) {
 	work := t.TempDir()
 	bin := filepath.Join(work, defaultBinaryName)
@@ -320,14 +462,15 @@ func TestExecuteRejectsMalformedJudgerJSON(t *testing.T) {
 		BlockID:              "b",
 		Binary:               bin,
 		WorkDir:              work,
+		ExpectedOutput:       expectedOutput(t, work),
 		Iterations:           1,
 		JudgerPath:           judger,
 		ContainerID:          "abc",
 		ExpectedCgroupParent: parent,
 		Timeout:              3 * time.Second,
 	})
-	if err != nil {
-		t.Fatal(err)
+	if err == nil {
+		t.Fatal("malformed Judger result was not enforced")
 	}
 	if samples[0].Status != "failed" || samples[0].CgroupContained {
 		t.Fatalf("malformed sample not rejected: %+v", samples[0])
@@ -363,14 +506,15 @@ func TestExecuteSurfacesJudgerResultCodes(t *testing.T) {
 				BlockID:              "b",
 				Binary:               bin,
 				WorkDir:              work,
+				ExpectedOutput:       expectedOutput(t, work),
 				Iterations:           1,
 				JudgerPath:           judger,
 				ContainerID:          "abc",
 				ExpectedCgroupParent: parent,
 				Timeout:              3 * time.Second,
 			})
-			if err != nil {
-				t.Fatal(err)
+			if err == nil {
+				t.Fatal("non-success Judger result was not enforced")
 			}
 			if samples[0].Status != tc.status {
 				t.Fatalf("status = %q, want %q (%+v)", samples[0].Status, tc.status, samples[0])
@@ -392,14 +536,15 @@ func TestExecuteOuterTimeoutKillsJudger(t *testing.T) {
 		BlockID:              "b",
 		Binary:               bin,
 		WorkDir:              work,
+		ExpectedOutput:       expectedOutput(t, work),
 		Iterations:           1,
 		JudgerPath:           judger,
 		ContainerID:          "abc",
 		ExpectedCgroupParent: parent,
 		Timeout:              150 * time.Millisecond,
 	})
-	if err != nil {
-		t.Fatal(err)
+	if err == nil {
+		t.Fatal("Judger timeout was not enforced")
 	}
 	if samples[0].Status != "judger_timeout" {
 		t.Fatalf("status = %q, want judger_timeout", samples[0].Status)
@@ -410,7 +555,7 @@ func TestExecuteRequiresContainerIDAndParent(t *testing.T) {
 	work := t.TempDir()
 	bin := filepath.Join(work, defaultBinaryName)
 	writeExecutable(t, bin, "#!/bin/sh\nexit 0\n")
-	base := options{Mode: modeExecute, Binary: bin, WorkDir: work, JudgerPath: "/bin/true"}
+	base := options{Mode: modeExecute, Binary: bin, WorkDir: work, ExpectedOutput: expectedOutput(t, work), JudgerPath: "/bin/true"}
 	if _, err := runBench(context.Background(), base); err == nil {
 		t.Fatal("execute accepted a missing container id")
 	}
@@ -460,6 +605,7 @@ func TestExecuteVerifiesPinnedJudgerDigest(t *testing.T) {
 		Mode:                 modeExecute,
 		Binary:               bin,
 		WorkDir:              work,
+		ExpectedOutput:       expectedOutput(t, work),
 		Iterations:           1,
 		JudgerPath:           judger,
 		JudgerSHA256:         judgerAlpha4AMD64SHA256,
@@ -480,6 +626,7 @@ func TestExecuteRejectsCgroupRootParent(t *testing.T) {
 		Mode:                 modeExecute,
 		Binary:               bin,
 		WorkDir:              work,
+		ExpectedOutput:       expectedOutput(t, work),
 		Iterations:           1,
 		JudgerPath:           "/bin/true",
 		ContainerID:          "abc",
@@ -502,6 +649,7 @@ func TestExecuteDefaultSandboxIdentityIsProduction(t *testing.T) {
 		Mode:                 modeExecute,
 		Binary:               bin,
 		WorkDir:              work,
+		ExpectedOutput:       expectedOutput(t, work),
 		Iterations:           1,
 		JudgerPath:           judger,
 		ContainerID:          "abc",

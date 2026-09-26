@@ -54,10 +54,11 @@
   ansible.builtin.set_fact:
     iris_bench_reboot_required: >-
       {{ (iris_bench_force_reboot | bool) or
-         ((iris_bench_reboot | bool) and
-          (iris_bench_reboot_if_changed | bool) and
-          ((iris_bench_boot_setting_changed | bool) or
-           (iris_bench_cpu_unit.changed | default(false) | bool))) }}
+          ((iris_bench_reboot | bool) and
+           (iris_bench_reboot_if_changed | bool) and
+           ((iris_bench_boot_setting_changed | bool) or
+            (iris_bench_user_delegate_dropin.changed | default(false) | bool) or
+            (iris_bench_cpu_unit.changed | default(false) | bool))) }}
 
 - name: Reboot | reboot when required for boot-time settings
   ansible.builtin.reboot:

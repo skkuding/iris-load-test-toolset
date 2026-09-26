@@ -6,3 +6,6 @@ terraform.tfvars
 runs/
 bin/
 ansible/.ansible/
+__pycache__/
+*.py[cod]
+.venv/

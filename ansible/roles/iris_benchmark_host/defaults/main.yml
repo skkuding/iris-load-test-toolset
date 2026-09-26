@@ -24,6 +24,7 @@ iris_bench_etc_dir: /etc/iris-bench
 
 # ---- cgroup v2 delegation ------------------------------------------------
 iris_bench_slice: iris-bench.slice
+iris_bench_operator_user: ""
 iris_bench_delegate_controllers: "cpu cpuset memory pids io"
 iris_bench_default_limits:
   DefaultLimitNOFILE: 1048576
@@ -108,7 +109,8 @@ iris_bench_keep_services:
 iris_bench_disable_services:
   # desktop / display manager
   - gdm
-  - gdm3
+  # Ubuntu's gdm3.service is an alias of gdm.service. Masking both names makes
+  # systemd reject the alias with FileExists after gdm.service is masked.
   - gnome-remote-desktop
   - gnome-initial-setup
   - colord
@@ -141,6 +143,7 @@ iris_bench_disable_services:
   - power-profiles-daemon
   - thermald
   - irqbalance
+  - cpufrequtils
 iris_bench_disable_sockets:
   - avahi-daemon.socket
   - cups.socket
