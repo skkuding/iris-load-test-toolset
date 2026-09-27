@@ -7,15 +7,17 @@ import (
 	"strconv"
 )
 
-// lock takes an exclusive per-run lock inside the tmpfs runtime directory. It
+// lock takes an exclusive per-run lock in a host-wide tmpfs lock directory. It
 // returns a release function. A held lock means another agent operation for the
-// same run is in progress and the caller must not mutate host state.
+// same run is in progress and the caller must not mutate host state. Keeping
+// locks outside rtDir prevents read-only post-cleanup operations such as bundle
+// from recreating an otherwise-clean run directory.
 func (a *agent) lock(runID string) (func(), error) {
-	dir := a.rtDir(runID)
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return nil, fmt.Errorf("create runtime dir: %w", err)
+	dir := filepath.Join(a.runRoot, ".locks")
+	if err := os.MkdirAll(dir, 0o770); err != nil {
+		return nil, fmt.Errorf("create runtime lock dir: %w", err)
 	}
-	path := filepath.Join(dir, "agent.lock")
+	path := filepath.Join(dir, runID+".lock")
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		if os.IsExist(err) {

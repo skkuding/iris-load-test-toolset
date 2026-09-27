@@ -31,8 +31,26 @@ func TestDecodeAppliesDefaults(t *testing.T) {
 	if cfg.Limits.MaxWorkers != 32 {
 		t.Errorf("maxWorkers = %d", cfg.Limits.MaxWorkers)
 	}
+	if cfg.Limits.MaxLoad1 != 1.0 {
+		t.Errorf("maxLoad1 = %v", cfg.Limits.MaxLoad1)
+	}
 	if h, ok := cfg.AllowedHost("codedang8"); !ok || h.HostIdentity != "server8" {
 		t.Errorf("AllowedHost = %+v, %v", h, ok)
+	}
+}
+
+func TestDecodeAcceptsExplicitSSHControlPath(t *testing.T) {
+	doc := strings.Replace(minimal, `"hosts"`, `"paths": {"sshControlPath": "~/.ssh/sockets/codedang8.sock"}, "hosts"`, 1)
+	cfg, err := Decode([]byte(doc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Paths.SSHControlPath != "~/.ssh/sockets/codedang8.sock" {
+		t.Fatalf("sshControlPath = %q", cfg.Paths.SSHControlPath)
+	}
+	bad := strings.Replace(minimal, `"hosts"`, "\"paths\": {\"sshControlPath\": \"bad\\nvalue\"}, \"hosts\"", 1)
+	if _, err := Decode([]byte(bad)); err == nil {
+		t.Fatal("Decode accepted a control path containing a newline")
 	}
 }
 
@@ -58,6 +76,7 @@ func TestValidateFailures(t *testing.T) {
 		"bad workers":     `{"schemaVersion":1,"iris":{"image":"x"},"profiles":{"p":{"suite":"judger","workers":0,"repetitions":1}},"hosts":[{"alias":"h","allow":true}]}`,
 		"bad cpuList":     `{"schemaVersion":1,"iris":{"image":"x"},"profiles":{"p":{"suite":"judger","workers":1,"repetitions":1,"cpuList":"a-b"}},"hosts":[{"alias":"h","allow":true}]}`,
 		"bad turbo":       `{"schemaVersion":1,"iris":{"image":"x"},"profiles":{"p":{"suite":"judger","workers":1,"repetitions":1,"turbo":"maybe"}},"hosts":[{"alias":"h","allow":true}]}`,
+		"bad max load":    `{"schemaVersion":1,"iris":{"image":"x"},"limits":{"maxLoad1":-1},"profiles":{},"hosts":[{"alias":"h","allow":true}]}`,
 	}
 	for name, doc := range cases {
 		if _, err := Decode([]byte(doc)); err == nil {

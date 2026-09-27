@@ -14,6 +14,8 @@ package experiment
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,6 +27,7 @@ import (
 
 	"github.com/skkuding/iris-load-test-toolset/internal/artifact"
 	"github.com/skkuding/iris-load-test-toolset/internal/containment"
+	"github.com/skkuding/iris-load-test-toolset/internal/protocol"
 )
 
 // Event status strings shared with the agent protocol.
@@ -48,6 +51,13 @@ type Containment interface {
 	Create(cfg containment.Config) (containment.Handle, error)
 	CgroupOf(pid int) (string, error)
 	Descendants(pid int) ([]int, error)
+	InspectCgroup(cgroupPath string) (containment.Inspection, error)
+	// RemoveEmptySandboxRoot removes a direct mount-root sandbox cgroup and the
+	// empty "box-<safe-id>" children live alpha.4 leaves under it, but only
+	// after proving every cgroup holds no member processes, no grandchildren,
+	// and no unexpected directory names, so empty stock alpha.4 residue can be
+	// cleaned after a production-compat block.
+	RemoveEmptySandboxRoot(cgroupPath string) error
 }
 
 // WorkerSpec describes one worker process and its containment assignment.
@@ -60,6 +70,9 @@ type WorkerSpec struct {
 	Args            []string
 	Fixture         string
 	ExpectedSamples int
+	// AcceptedUncontainedCgroup is non-empty only for the explicit stock
+	// alpha.4 compatibility population. It is a run-specific root cgroup path.
+	AcceptedUncontainedCgroup string
 	// OutputPath is where the worker writes its NDJSON samples.
 	OutputPath string
 }
@@ -96,6 +109,8 @@ type BlockRequest struct {
 	// SamplesName and ReceiptName are paths relative to RunDir.
 	SamplesName string
 	ReceiptName string
+	// WorkloadBinarySHA256 identifies the exact precompiled measured workload.
+	WorkloadBinarySHA256 string
 }
 
 // WorkerReceipt records per-worker containment and sample evidence.
@@ -113,18 +128,27 @@ type WorkerReceipt struct {
 
 // Receipt is the atomic outcome of a block.
 type Receipt struct {
-	SchemaVersion   int             `json:"schemaVersion"`
-	RunID           string          `json:"runId"`
-	BlockID         string          `json:"blockId"`
-	Status          string          `json:"status"`
-	DelegatedParent string          `json:"delegatedParent"`
-	SampleCount     int             `json:"sampleCount"`
-	SamplesSHA256   string          `json:"samplesSha256"`
-	Workers         []WorkerReceipt `json:"workers"`
-	Escape          string          `json:"escape,omitempty"`
-	Failure         string          `json:"failure,omitempty"`
-	StartedAt       time.Time       `json:"startedAt"`
-	DurationMillis  float64         `json:"durationMillis"`
+	SchemaVersion        int             `json:"schemaVersion"`
+	RunID                string          `json:"runId"`
+	BlockID              string          `json:"blockId"`
+	Status               string          `json:"status"`
+	DelegatedParent      string          `json:"delegatedParent"`
+	SampleCount          int             `json:"sampleCount"`
+	SamplesSHA256        string          `json:"samplesSha256"`
+	WorkloadBinarySHA256 string          `json:"workloadBinarySha256"`
+	Workers              []WorkerReceipt `json:"workers"`
+	Escape               string          `json:"escape,omitempty"`
+	Failure              string          `json:"failure,omitempty"`
+	// SteadyWindowStartNs and SteadyWindowEndNs bound the interval in which
+	// every worker had at least one submission in flight or pending
+	// simultaneously. SteadyWindowSeconds is that interval's duration in
+	// seconds. They are zero only on a failure receipt; a passing block always
+	// records a validated window.
+	SteadyWindowStartNs int64     `json:"steadyWindowStartNs"`
+	SteadyWindowEndNs   int64     `json:"steadyWindowEndNs"`
+	SteadyWindowSeconds float64   `json:"steadyWindowSeconds"`
+	StartedAt           time.Time `json:"startedAt"`
+	DurationMillis      float64   `json:"durationMillis"`
 }
 
 // Result reports the written artifacts of a completed block.
@@ -143,6 +167,17 @@ type Coordinator struct {
 	// KillFunc, when set, is called for an escaped process and its
 	// descendants so an escape is stopped, not merely reported.
 	KillFunc func(pid int) error
+	// CleanupSandboxRoot, when set, replaces RemoveEmptySandboxRoot for the
+	// accepted production-compat roots. It must itself prove, through a
+	// read-only containment validation, that the exact sandbox-<safe-id>
+	// root and every box-<safe-id> child hold no member processes, have no
+	// grandchildren, and have no unexpected directory names, must refuse and
+	// preserve any non-empty or unsafe cgroup, and must remove the validated
+	// cgroups using only their canonical full filesystem paths in
+	// child-first, root-last order. The coordinator verifies absence through
+	// InspectCgroup afterwards. It is used in OCI mode, where the leftover
+	// root is root-owned and an unprivileged manager cannot rmdir it.
+	CleanupSandboxRoot func(ctx context.Context, cgroupPath string) error
 }
 
 type workerState struct {
@@ -174,7 +209,7 @@ func (c *Coordinator) emitCheck(name, status, message string) {
 
 // Run executes the block. It always attempts cleanup, and returns an error
 // unless the block completed and every post-condition was verified.
-func (c *Coordinator) Run(ctx context.Context, req BlockRequest) (Result, error) {
+func (c *Coordinator) Run(ctx context.Context, req BlockRequest) (result Result, retErr error) {
 	if err := validateRequest(req); err != nil {
 		return Result{}, err
 	}
@@ -200,9 +235,22 @@ func (c *Coordinator) Run(ctx context.Context, req BlockRequest) (Result, error)
 	defer cancel()
 
 	var (
-		states []workerState
-		launch Launcher
+		states             []workerState
+		launch             Launcher
+		productionVerified bool
 	)
+	defer func() {
+		if retErr == nil || productionVerified {
+			return
+		}
+		// Best-effort cleanup must still run after a cancelled or timed-out
+		// block, so the callback receives a context that retains values but
+		// is not already cancelled.
+		if err := c.verifyProductionCgroups(context.WithoutCancel(runCtx), req.Workers); err != nil {
+			retErr = errors.Join(retErr, err)
+			c.writeFailureReceipt(req, states, retErr, start)
+		}
+	}()
 	cleanup := func() {
 		for _, st := range states {
 			if st.worker != nil {
@@ -222,9 +270,15 @@ func (c *Coordinator) Run(ctx context.Context, req BlockRequest) (Result, error)
 	// Create and verify every subtree before any worker starts.
 	for i := range req.Workers {
 		spec := req.Workers[i]
+		name, err := SubtreeName(req.RunID, req.BlockID, spec.ID)
+		if err != nil {
+			cleanup()
+			c.emitCheck("cgroup-create-"+spec.ID, StatusFailed, err.Error())
+			return Result{}, err
+		}
 		h, err := c.Containment.Create(containment.Config{
 			Parent: req.Parent,
-			Name:   subtreeName(req, spec),
+			Name:   name,
 			CPUSet: spec.CPUList,
 			Mems:   spec.Mems,
 			CPUMax: spec.CPUMax,
@@ -299,11 +353,17 @@ func (c *Coordinator) Run(ctx context.Context, req BlockRequest) (Result, error)
 		}
 		c.emitCheck("cgroup-empty-"+st.spec.ID, StatusPassed, st.handle.RelPath())
 	}
+	productionVerified = true
+	if err := c.verifyProductionCgroups(runCtx, req.Workers); err != nil {
+		cleanup()
+		c.writeFailureReceipt(req, states, err, start)
+		return Result{}, err
+	}
 
 	// Collect and count samples before removing evidence-bearing cgroups. Each
 	// sample must prove its own containment; a sample that reports escape or a
 	// mismatched worker identity is a failed block, not merely a warning.
-	samples, sampleCount, err := collectSamples(req, states)
+	samples, sampleCount, window, err := collectSamples(req, states)
 	if err != nil {
 		cleanup()
 		c.emitCheck("sample-count", StatusFailed, err.Error())
@@ -311,6 +371,7 @@ func (c *Coordinator) Run(ctx context.Context, req BlockRequest) (Result, error)
 		return Result{}, err
 	}
 	c.emitCheck("sample-count", StatusPassed, fmt.Sprintf("%d samples", sampleCount))
+	c.emitCheck("steady-window", StatusPassed, fmt.Sprintf("%dns..%dns (%.3fs)", window.startNs, window.endNs, float64(window.endNs-window.startNs)/1e9))
 
 	// Remove subtrees and prove none remain.
 	for _, st := range states {
@@ -342,7 +403,7 @@ func (c *Coordinator) Run(ctx context.Context, req BlockRequest) (Result, error)
 	}
 	c.emitPhase("samples", StatusPassed)
 
-	receipt := buildReceipt(req, states, sampleCount, samplesHash, "", "", start, c.now())
+	receipt := buildReceipt(req, states, sampleCount, samplesHash, "", "", window, start, c.now())
 	receiptPath := filepath.Join(req.RunDir, filepath.FromSlash(req.ReceiptName))
 	if err := artifact.WriteJSONAtomic(receiptPath, receipt, 0o644); err != nil {
 		return Result{}, fmt.Errorf("experiment: write receipt: %w", err)
@@ -352,6 +413,46 @@ func (c *Coordinator) Run(ctx context.Context, req BlockRequest) (Result, error)
 		return Result{}, err
 	}
 	return Result{Receipt: receipt, ReceiptPath: receiptPath, ReceiptSHA256: receiptSHA}, nil
+}
+
+func (c *Coordinator) verifyProductionCgroups(ctx context.Context, specs []WorkerSpec) error {
+	var residualErr error
+	for _, spec := range specs {
+		if spec.AcceptedUncontainedCgroup == "" {
+			continue
+		}
+		// Stock alpha.4 leaves an empty run-scoped root plus empty box-<id>
+		// child cgroups after the sandbox exits. Remove them only through the
+		// tightly validated path, which refuses and preserves evidence if any
+		// member process, grandchild, or unexpected child remains. OCI mode
+		// injects a callback because the root is root-owned and an
+		// unprivileged manager cannot remove it directly.
+		var removeErr error
+		if c.CleanupSandboxRoot != nil {
+			removeErr = c.CleanupSandboxRoot(ctx, spec.AcceptedUncontainedCgroup)
+		} else {
+			removeErr = c.Containment.RemoveEmptySandboxRoot(spec.AcceptedUncontainedCgroup)
+		}
+		if removeErr != nil {
+			residualErr = errors.Join(residualErr, removeErr)
+			c.emitCheck("production-cgroup-removed-"+spec.ID, StatusFailed, removeErr.Error())
+			continue
+		}
+		inspection, err := c.Containment.InspectCgroup(spec.AcceptedUncontainedCgroup)
+		if err != nil {
+			residualErr = errors.Join(residualErr, err)
+			c.emitCheck("production-cgroup-removed-"+spec.ID, StatusFailed, err.Error())
+			continue
+		}
+		if inspection.Exists {
+			err := fmt.Errorf("experiment: production cgroup %s remains with members %v", inspection.Path, inspection.Members)
+			residualErr = errors.Join(residualErr, err)
+			c.emitCheck("production-cgroup-removed-"+spec.ID, StatusFailed, err.Error())
+			continue
+		}
+		c.emitCheck("production-cgroup-removed-"+spec.ID, StatusPassed, inspection.Path)
+	}
+	return residualErr
 }
 
 func (c *Coordinator) waitWorkers(ctx context.Context, states []workerState, escapeCh <-chan error) error {
@@ -406,6 +507,9 @@ func (c *Coordinator) monitor(ctx context.Context, states []workerState, interva
 						continue
 					}
 					if !containment.IsWithin(st.handle.RelPath(), cg) {
+						if st.spec.AcceptedUncontainedCgroup != "" && containment.WithinMountRelative(containment.DefaultMount, st.spec.AcceptedUncontainedCgroup, cg) {
+							continue
+						}
 						c.killEscape(p)
 						select {
 						case escapeCh <- fmt.Errorf("%w: pid %d in %s, want under %s", containment.ErrEscape, p, cg, st.handle.RelPath()):
@@ -456,6 +560,9 @@ func validateRequest(req BlockRequest) error {
 	if req.SamplesName == "" || req.ReceiptName == "" {
 		return errors.New("experiment: samples and receipt names are required")
 	}
+	if !artifact.ValidSHA256(req.WorkloadBinarySHA256) {
+		return errors.New("experiment: workload binary sha256 is required")
+	}
 	if err := artifact.ValidateRelativePath(req.SamplesName); err != nil {
 		return fmt.Errorf("experiment: samples name: %w", err)
 	}
@@ -471,6 +578,9 @@ func validateRequest(req BlockRequest) error {
 			return fmt.Errorf("experiment: duplicate worker id %q", w.ID)
 		}
 		seen[w.ID] = true
+		if _, err := SubtreeName(req.RunID, req.BlockID, w.ID); err != nil {
+			return err
+		}
 		if w.CPUList == "" {
 			return fmt.Errorf("experiment: worker %q has no cpu list", w.ID)
 		}
@@ -487,8 +597,39 @@ func validateRequest(req BlockRequest) error {
 	return nil
 }
 
-func subtreeName(req BlockRequest, spec WorkerSpec) string {
-	return req.RunID + "/" + req.BlockID + "/" + spec.ID
+// maxSubtreeComponentLen bounds the single cgroup path component that names a
+// worker subtree. It matches the Linux NAME_MAX limit so the flat name is a
+// valid directory entry even for the longest protocol-safe identifiers.
+const maxSubtreeComponentLen = 255
+
+// SubtreeName returns the single, flat, run-scoped cgroup component that names
+// one worker's containment subtree below the delegated parent.
+//
+// The name must be flat. cgroup v2 controllers are only inherited by direct
+// children of the delegated parent; a nested run/block/worker path cannot carry
+// the cpuset and cpu limits this benchmark writes and verifies, so the live
+// boundary fails. Both the coordinator and the agent (which forwards the
+// expected parent to Judger) derive the name here so the two can never diverge.
+//
+// runID, blockID, and workerID must already satisfy the protocol identifier
+// rules. A rejected identifier is an error, never a silently rewritten name.
+func SubtreeName(runID, blockID, workerID string) (string, error) {
+	if !protocol.ValidRunID(runID) {
+		return "", fmt.Errorf("experiment: subtree run id %q is not protocol-safe", runID)
+	}
+	if !protocol.ValidOperationID(blockID) {
+		return "", fmt.Errorf("experiment: subtree block id %q is not protocol-safe", blockID)
+	}
+	if !protocol.ValidOperationID(workerID) {
+		return "", fmt.Errorf("experiment: subtree worker id %q is not protocol-safe", workerID)
+	}
+	name := runID + "-" + blockID + "-" + workerID
+	if len(name) > maxSubtreeComponentLen {
+		sum := sha256.Sum256([]byte(name))
+		digest := hex.EncodeToString(sum[:8])
+		name = name[:maxSubtreeComponentLen-len(digest)-1] + "-" + digest
+	}
+	return name, nil
 }
 
 // sampleProbe is the subset of a worker NDJSON sample whose containment and
@@ -499,15 +640,41 @@ type sampleProbe struct {
 	Worker          string `json:"worker"`
 	CgroupContained bool   `json:"cgroupContained"`
 	CgroupPath      string `json:"cgroupPath"`
+	Status          string `json:"status"`
+	ErrorCode       int    `json:"errorCode"`
+	ResultCode      int    `json:"resultCode"`
+	OutputMatches   bool   `json:"outputMatches"`
+	ContainmentMode string `json:"containmentMode"`
+	Comparable      bool   `json:"comparable"`
+	StartedAtNs     int64  `json:"startedAtNs"`
+	EndedAtNs       int64  `json:"endedAtNs"`
 }
 
-func collectSamples(req BlockRequest, states []workerState) ([]byte, int, error) {
+// steadyWindow is the validated all-workers-active interval shared by every
+// worker in one block.
+type steadyWindow struct {
+	startNs int64
+	endNs   int64
+}
+
+// minSteadyWindowNs is the floor that keeps a "steady" window from being a
+// scheduling artifact. The accepted window must also cover at least half of the
+// full first-start-to-last-end span; see steadyWindowFromSamples.
+const minSteadyWindowNs int64 = int64(2 * time.Second)
+
+// collectSamples reads and validates every worker's NDJSON samples, counts them
+// against ExpectedSamples, and derives the block's all-workers-active steady
+// window. Samples are never dropped and the expected/validation semantics are
+// unchanged. A block whose steady window is missing, empty, or negligible is
+// rejected so an unsynchronized window is never reported as a measurement.
+func collectSamples(req BlockRequest, states []workerState) ([]byte, int, steadyWindow, error) {
 	var buf bytes.Buffer
 	total := 0
-	for _, st := range states {
+	intervals := make([]workerInterval, len(states))
+	for i, st := range states {
 		data, err := os.ReadFile(st.spec.OutputPath)
 		if err != nil {
-			return nil, 0, fmt.Errorf("experiment: worker %s samples: %w", st.spec.ID, err)
+			return nil, 0, steadyWindow{}, fmt.Errorf("experiment: worker %s samples: %w", st.spec.ID, err)
 		}
 		count := 0
 		for _, line := range bytes.Split(data, []byte{'\n'}) {
@@ -517,28 +684,96 @@ func collectSamples(req BlockRequest, states []workerState) ([]byte, int, error)
 			}
 			var probe sampleProbe
 			if err := json.Unmarshal(line, &probe); err != nil {
-				return nil, 0, fmt.Errorf("experiment: worker %s emitted invalid NDJSON: %w", st.spec.ID, err)
+				return nil, 0, steadyWindow{}, fmt.Errorf("experiment: worker %s emitted invalid NDJSON: %w", st.spec.ID, err)
 			}
 			if err := validateSample(req, st, probe); err != nil {
-				return nil, 0, fmt.Errorf("experiment: worker %s sample %d: %w", st.spec.ID, count, err)
+				return nil, 0, steadyWindow{}, fmt.Errorf("experiment: worker %s sample %d: %w", st.spec.ID, count, err)
 			}
+			intervals[i].observe(probe.StartedAtNs, probe.EndedAtNs)
 			buf.Write(line)
 			buf.WriteByte('\n')
 			count++
 			total++
 		}
 		if count != st.spec.ExpectedSamples {
-			return nil, 0, fmt.Errorf("experiment: worker %s produced %d samples, expected %d", st.spec.ID, count, st.spec.ExpectedSamples)
+			return nil, 0, steadyWindow{}, fmt.Errorf("experiment: worker %s produced %d samples, expected %d", st.spec.ID, count, st.spec.ExpectedSamples)
 		}
 	}
-	return buf.Bytes(), total, nil
+	window, err := steadyWindowFromSamples(req.BlockID, states, intervals)
+	if err != nil {
+		return nil, 0, steadyWindow{}, err
+	}
+	return buf.Bytes(), total, window, nil
+}
+
+// workerInterval accumulates one worker's active interval from its samples.
+type workerInterval struct {
+	firstStart int64
+	lastEnd    int64
+	valid      int
+}
+
+// observe widens the worker's interval with a sample's positive timestamps.
+// Samples without valid positive timestamps are ignored here; the block-level
+// check below still requires every worker to contribute at least one.
+func (w *workerInterval) observe(startedAtNs, endedAtNs int64) {
+	if startedAtNs <= 0 || endedAtNs <= 0 || endedAtNs < startedAtNs {
+		return
+	}
+	if w.valid == 0 || startedAtNs < w.firstStart {
+		w.firstStart = startedAtNs
+	}
+	if w.valid == 0 || endedAtNs > w.lastEnd {
+		w.lastEnd = endedAtNs
+	}
+	w.valid++
+}
+
+// steadyWindowFromSamples validates and returns the all-workers-active window:
+// [max over workers of first start, min over workers of last end]. It fails
+// closed when any worker has no valid timestamp, when the window is empty, or
+// when it is negligible relative to the block's full span.
+func steadyWindowFromSamples(blockID string, states []workerState, intervals []workerInterval) (steadyWindow, error) {
+	var minFirst, maxLast int64
+	var windowStart, windowEnd int64
+	for i, w := range intervals {
+		if w.valid == 0 {
+			return steadyWindow{}, fmt.Errorf("experiment: block %s worker %s has no sample with valid positive timestamps; refusing an unsynchronized measurement window", blockID, states[i].spec.ID)
+		}
+		if i == 0 || w.firstStart < minFirst {
+			minFirst = w.firstStart
+		}
+		if i == 0 || w.lastEnd > maxLast {
+			maxLast = w.lastEnd
+		}
+		if i == 0 || w.firstStart > windowStart {
+			windowStart = w.firstStart
+		}
+		if i == 0 || w.lastEnd < windowEnd {
+			windowEnd = w.lastEnd
+		}
+	}
+	if windowStart >= windowEnd {
+		return steadyWindow{}, fmt.Errorf("experiment: block %s all-workers-active window is empty (start %dns >= end %dns); refusing an unsynchronized measurement window", blockID, windowStart, windowEnd)
+	}
+	required := (maxLast - minFirst) / 2
+	if required > minSteadyWindowNs {
+		required = minSteadyWindowNs
+	}
+	if windowEnd-windowStart < required {
+		return steadyWindow{}, fmt.Errorf("experiment: block %s all-workers-active window %dns is negligible (< %dns over a %dns span); refusing an unsynchronized measurement window", blockID, windowEnd-windowStart, required, maxLast-minFirst)
+	}
+	return steadyWindow{startNs: windowStart, endNs: windowEnd}, nil
 }
 
 // validateSample rejects a sample that does not prove containment in the
 // worker's own subtree or that carries another worker's identity.
 func validateSample(req BlockRequest, st workerState, s sampleProbe) error {
-	if !s.CgroupContained {
-		return fmt.Errorf("%w: sample is not cgroupContained", containment.ErrEscape)
+	if s.Status != "success" || s.ErrorCode != 0 || s.ResultCode != 0 {
+		return fmt.Errorf("sample result is not successful: status=%q error=%d result=%d", s.Status, s.ErrorCode, s.ResultCode)
+	}
+	if !s.OutputMatches {
+		return errors.New("sample output does not match expected output")
 	}
 	if s.Worker != st.spec.ID {
 		return fmt.Errorf("worker identity mismatch: sample names %q, want %q", s.Worker, st.spec.ID)
@@ -554,6 +789,15 @@ func validateSample(req BlockRequest, st workerState, s sampleProbe) error {
 	}
 	if !filepath.IsAbs(s.CgroupPath) {
 		return fmt.Errorf("sample cgroupPath %q is not absolute", s.CgroupPath)
+	}
+	if st.spec.AcceptedUncontainedCgroup != "" {
+		if s.CgroupContained || s.Comparable || s.ContainmentMode != "production-compat" || !containment.WithinMountRelative(containment.DefaultMount, st.spec.AcceptedUncontainedCgroup, s.CgroupPath) {
+			return fmt.Errorf("production compatibility sample has invalid uncontained cgroup metadata for %q", st.spec.AcceptedUncontainedCgroup)
+		}
+		return nil
+	}
+	if !s.CgroupContained || !s.Comparable || s.ContainmentMode != "isolated" {
+		return fmt.Errorf("%w: isolated sample is not contained and comparable", containment.ErrEscape)
 	}
 	if st.handle == nil || !pathWithin(st.handle.FSPath(), s.CgroupPath) {
 		want := ""
@@ -577,25 +821,29 @@ func pathWithin(parent, child string) bool {
 }
 
 func (c *Coordinator) writeFailureReceipt(req BlockRequest, states []workerState, cause error, start time.Time) {
-	receipt := buildReceipt(req, states, 0, "", cause.Error(), "", start, c.now())
+	receipt := buildReceipt(req, states, 0, "", cause.Error(), "", steadyWindow{}, start, c.now())
 	receipt.Status = StatusFailed
 	path := filepath.Join(req.RunDir, filepath.FromSlash(req.ReceiptName))
 	_ = artifact.WriteJSONAtomic(path, receipt, 0o644)
 }
 
-func buildReceipt(req BlockRequest, states []workerState, sampleCount int, samplesHash, failure, escape string, start, end time.Time) Receipt {
+func buildReceipt(req BlockRequest, states []workerState, sampleCount int, samplesHash, failure, escape string, window steadyWindow, start, end time.Time) Receipt {
 	r := Receipt{
-		SchemaVersion:   1,
-		RunID:           req.RunID,
-		BlockID:         req.BlockID,
-		Status:          StatusPassed,
-		DelegatedParent: req.Parent,
-		SampleCount:     sampleCount,
-		SamplesSHA256:   samplesHash,
-		Escape:          escape,
-		Failure:         failure,
-		StartedAt:       start.UTC(),
-		DurationMillis:  float64(end.Sub(start).Milliseconds()),
+		SchemaVersion:        1,
+		RunID:                req.RunID,
+		BlockID:              req.BlockID,
+		Status:               StatusPassed,
+		DelegatedParent:      req.Parent,
+		SampleCount:          sampleCount,
+		SamplesSHA256:        samplesHash,
+		WorkloadBinarySHA256: req.WorkloadBinarySHA256,
+		Escape:               escape,
+		Failure:              failure,
+		SteadyWindowStartNs:  window.startNs,
+		SteadyWindowEndNs:    window.endNs,
+		SteadyWindowSeconds:  float64(window.endNs-window.startNs) / 1e9,
+		StartedAt:            start.UTC(),
+		DurationMillis:       float64(end.Sub(start).Milliseconds()),
 	}
 	for _, st := range states {
 		wr := WorkerReceipt{

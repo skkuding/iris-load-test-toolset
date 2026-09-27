@@ -17,15 +17,17 @@ func validInput() BuildInput {
 		Suite:       "judger",
 		Profile:     "isolated-1s",
 		Fixtures: []Fixture{
-			{Name: "cpp", Path: "fixtures/source.cpp", SHA256: strings.Repeat("a", 64)},
+			{Name: "cpp", Path: "fixtures/input.txt", SHA256: strings.Repeat("a", 64), ExpectedOutputPath: "fixtures/output.txt", ExpectedOutputSHA256: strings.Repeat("d", 64)},
 		},
 		Images: map[string]Image{
 			"iris": {Reference: DefaultIrisImage, Digest: "sha256:" + strings.Repeat("b", 64)},
 		},
-		JudgerDigest: "sha256:" + strings.Repeat("c", 64),
+		JudgerDigest:   "sha256:" + strings.Repeat("c", 64),
+		WorkloadBinary: StagedFile{Path: "/tmp/workload", SHA256: strings.Repeat("e", 64)},
 		Blocks: []Block{
 			{ID: "isolated-1s-01", Suite: "judger", Profile: "isolated-1s", Workers: 1, Repetitions: 5},
 		},
+		Qualification: Qualification{MaxLoad1: 1.0},
 	}
 }
 
@@ -89,6 +91,31 @@ func TestValidateRunnable(t *testing.T) {
 	}
 	if err := p2.ValidateRunnable(); err == nil {
 		t.Fatal("ValidateRunnable accepted a missing judger digest")
+	}
+}
+
+func TestProductionCompatRequiresSealedLocalBenchmarkImage(t *testing.T) {
+	in := validInput()
+	in.ContainmentMode = ContainmentProductionCompat
+	if _, err := Build(in); err == nil || !strings.Contains(err.Error(), "requires a judger-bench OCI image") {
+		t.Fatalf("Build error = %v", err)
+	}
+	imageID := "sha256:" + strings.Repeat("f", 64)
+	in.Images["judger-bench"] = Image{Reference: imageID, Digest: imageID}
+	if _, err := Build(in); err != nil {
+		t.Fatalf("Build with local image ID: %v", err)
+	}
+	in.Images["judger-bench"] = Image{Reference: "judger-bench:latest", Digest: imageID}
+	if _, err := Build(in); err == nil {
+		t.Fatal("Build accepted a mutable benchmark image reference")
+	}
+}
+
+func TestBuildRejectsInvalidQualificationLoad(t *testing.T) {
+	in := validInput()
+	in.Qualification.MaxLoad1 = 0
+	if _, err := Build(in); err == nil || !strings.Contains(err.Error(), "maxLoad1") {
+		t.Fatalf("Build error = %v, want maxLoad1 validation", err)
 	}
 }
 

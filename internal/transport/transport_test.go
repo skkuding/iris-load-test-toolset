@@ -36,6 +36,44 @@ func TestSocketPathUnderHomeSockets(t *testing.T) {
 	}
 }
 
+func TestSocketPathExplicitControlPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	s := SSH{
+		Host: "codedang8",
+		Opts: Options{
+			BatchMode:      true,
+			ConnectTimeout: 15,
+			ControlPath:    "~/.ssh/sockets/codedang8.sock",
+		},
+	}
+	p, err := s.SocketPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(home, ".ssh", "sockets", "codedang8.sock")
+	if p != want {
+		t.Fatalf("socket path = %q, want %q", p, want)
+	}
+	args, err := s.BaseArgs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "ControlPath="+want) {
+		t.Fatalf("BaseArgs missing explicit ControlPath: %v", args)
+	}
+}
+
+func TestSocketPathRejectsRelativeControlPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	s := SSH{Host: "codedang8", Opts: Options{ControlPath: "relative.sock"}}
+	if _, err := s.SocketPath(); err == nil {
+		t.Fatal("expected error for relative control path")
+	}
+}
+
 func TestBaseArgsControlPath(t *testing.T) {
 	s, home := sshForTest(t)
 	args, err := s.BaseArgs()
@@ -136,5 +174,86 @@ func TestAgentClientValidatesBeforeSpawn(t *testing.T) {
 	bad := protocol.Request{ProtocolVersion: 99, OperationID: "op-1", RunID: "r-1", Action: protocol.ActionInspect}
 	if _, err := c.Invoke(context.Background(), bad, nil); err == nil {
 		t.Fatal("Invoke accepted an invalid request")
+	}
+}
+
+func TestRunDirAndStagedPathValidation(t *testing.T) {
+	dir, err := RunDir("iris-20260925-abcdefgh")
+	if err != nil || dir != "/tmp/iris-bench-iris-20260925-abcdefgh" {
+		t.Fatalf("RunDir = %q, %v", dir, err)
+	}
+	for _, bad := range []string{"../escape", "bad/id", ""} {
+		if _, err := RunDir(bad); err == nil {
+			t.Errorf("RunDir(%q) accepted", bad)
+		}
+	}
+	for _, bad := range []string{
+		"/tmp/iris-bench-iris-20260925-abcdefgh",
+		"/tmp/iris-bench-iris-20260925-abcdefgh/../escape",
+		"/tmp/other/file",
+		"/tmp/iris-bench-bad/id/file",
+	} {
+		if err := validateRunFilePath(bad); err == nil {
+			t.Errorf("validateRunFilePath(%q) accepted", bad)
+		}
+	}
+}
+
+func TestSHA256ParsesRemoteDigestAndRejectsUnsafePath(t *testing.T) {
+	dir := t.TempDir()
+	sshBin := filepath.Join(dir, "fake-ssh")
+	digest := strings.Repeat("a", 64)
+	script := "#!/bin/sh\nfor last do :; done\nprintf '" + digest + "  %s\\n' \"$last\"\n"
+	if err := os.WriteFile(sshBin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := SSH{Host: "codedang8", Opts: Options{SSHBinary: sshBin, SocketDir: filepath.Join(dir, "sockets"), ConnectTimeout: 15}}
+	path := "/tmp/iris-bench-iris-20260925-abcdefgh/agent"
+	got, err := s.SHA256(context.Background(), path)
+	if err != nil || got != digest {
+		t.Fatalf("SHA256 = %q, %v", got, err)
+	}
+	if _, err := s.SHA256(context.Background(), "/tmp/iris-bench-iris-20260925-abcdefgh/../agent"); err == nil {
+		t.Fatal("SHA256 accepted traversal")
+	}
+}
+
+func TestRunDirectoryMethodsRejectInvalidIDBeforeSpawn(t *testing.T) {
+	s := SSH{Host: "codedang8", Opts: Options{SSHBinary: "definitely-not-a-command", ConnectTimeout: 15}}
+	if _, err := s.CreateRunDir(context.Background(), "../escape"); err == nil {
+		t.Fatal("CreateRunDir accepted invalid run id")
+	}
+	if err := s.RemoveRunDir(context.Background(), "../escape"); err == nil {
+		t.Fatal("RemoveRunDir accepted invalid run id")
+	}
+}
+
+func TestCreateAndRemoveRunDirectoryUseValidatedPrivatePath(t *testing.T) {
+	dir := t.TempDir()
+	record := filepath.Join(dir, "commands")
+	sshBin := filepath.Join(dir, "fake-ssh")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + record + "\n" +
+		"for arg do case \"$arg\" in %F) printf 'directory\\n';; %a) printf '700\\n';; esac; done\n"
+	if err := os.WriteFile(sshBin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := SSH{Host: "codedang8", Opts: Options{SSHBinary: sshBin, SocketDir: filepath.Join(dir, "sockets"), ConnectTimeout: 15}}
+	runID := "iris-20260925-abcdefgh"
+	got, err := s.CreateRunDir(context.Background(), runID)
+	if err != nil || got != "/tmp/iris-bench-"+runID {
+		t.Fatalf("CreateRunDir = %q, %v", got, err)
+	}
+	if err := s.RemoveRunDir(context.Background(), runID); err != nil {
+		t.Fatal(err)
+	}
+	commands, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(commands)
+	for _, want := range []string{"mkdir -m 0700 -- " + got, "chmod 0700 -- " + got, "rm -rf -- " + got} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("remote commands missing %q in %q", want, text)
+		}
 	}
 }

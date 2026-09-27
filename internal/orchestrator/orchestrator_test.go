@@ -80,6 +80,13 @@ func TestTransitionRules(t *testing.T) {
 	}
 }
 
+func TestBundleAllowedOnlyAfterCleanup(t *testing.T) {
+	got := AllowedStates(protocol.ActionBundle)
+	if len(got) != 1 || got[0] != StateCleaned {
+		t.Fatalf("bundle states = %v, want [%s]", got, StateCleaned)
+	}
+}
+
 func TestRunOperationHappyAndReplay(t *testing.T) {
 	o, runID := newOrch(t)
 	inv := &fakeInvoker{}

@@ -13,15 +13,18 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/skkuding/iris-load-test-toolset/internal/artifact"
 	"github.com/skkuding/iris-load-test-toolset/internal/containment"
 	"github.com/skkuding/iris-load-test-toolset/internal/experiment"
 	"github.com/skkuding/iris-load-test-toolset/internal/protocol"
 	"github.com/skkuding/iris-load-test-toolset/internal/runplan"
+	"github.com/skkuding/iris-load-test-toolset/internal/telemetry"
 )
 
 const testRunID = "iris-20260925-abcdefgh"
@@ -39,19 +42,32 @@ func newTestAgent(t *testing.T) *agent {
 // buildTestPlan returns a structurally valid plan for the direct suite.
 func buildTestPlan(t *testing.T, suite string, workers int) runplan.Plan {
 	t.Helper()
+	fixtureDir := t.TempDir()
+	input := filepath.Join(fixtureDir, "input.txt")
+	expected := filepath.Join(fixtureDir, "expected.txt")
+	if err := os.WriteFile(input, []byte("1 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(expected, []byte("3\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	inputSHA, _, _ := artifact.HashFile(input)
+	expectedSHA, _, _ := artifact.HashFile(expected)
 	plan, err := runplan.Build(runplan.BuildInput{
-		ToolVersion:  "test",
-		RunID:        testRunID,
-		Target:       runplan.Target{SSHAlias: "host"},
-		Suite:        suite,
-		Profile:      "isolated",
-		Images:       map[string]runplan.Image{"iris": {Reference: runplan.DefaultIrisImage, Digest: "sha256:" + strings.Repeat("a", 64)}},
-		JudgerDigest: "sha256:" + strings.Repeat("b", 64),
+		ToolVersion:    "test",
+		RunID:          testRunID,
+		Target:         runplan.Target{SSHAlias: "host"},
+		Suite:          suite,
+		Profile:        "isolated",
+		Images:         map[string]runplan.Image{"iris": {Reference: runplan.DefaultIrisImage, Digest: "sha256:" + strings.Repeat("a", 64)}},
+		JudgerDigest:   "sha256:" + strings.Repeat("b", 64),
+		WorkloadBinary: runplan.StagedFile{Path: input, SHA256: inputSHA},
+		Fixtures:       []runplan.Fixture{{Name: "fixture", Path: input, SHA256: inputSHA, ExpectedOutputPath: expected, ExpectedOutputSHA256: expectedSHA}},
 		Blocks: []runplan.Block{{
 			ID: "block-01", Suite: suite, Profile: "isolated",
 			Workers: workers, CPUList: "0-3", Repetitions: 2,
 		}},
-		Qualification: runplan.Qualification{MaxRunSeconds: 5},
+		Qualification: runplan.Qualification{RequireCgroupV2: true, MinPhysicalCores: 1, MaxLoad1: 1e9, MaxRunSeconds: 5},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -66,6 +82,12 @@ func stageBuiltPlan(t *testing.T, a *agent, suite string, workers int) string {
 	plan := buildTestPlan(t, suite, workers)
 	dir := a.runDir(testRunID)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "qualification"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "qualification", "host-facts.json"), []byte(`{"cgroupVersion":"v2","physicalCores":"4","load1":"0.5"}`+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := plan.WriteStore(filepath.Join(dir, "plan.json")); err != nil {
@@ -118,7 +140,8 @@ func request(action protocol.Action, planSHA, blockID string) protocol.Request {
 
 func TestInspectWritesFacts(t *testing.T) {
 	a := newTestAgent(t)
-	_, terminal, err := execAgent(t, a, request(protocol.ActionInspect, "", ""))
+	sha := stageBuiltPlan(t, a, "judger", 1)
+	_, terminal, err := execAgent(t, a, request(protocol.ActionInspect, sha, ""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,6 +150,117 @@ func TestInspectWritesFacts(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(a.runDir(testRunID), "qualification", "host-facts.json")); err != nil {
 		t.Fatalf("facts not written: %v", err)
+	}
+}
+
+func TestInspectCopiesValidatedQualificationReport(t *testing.T) {
+	a := newTestAgent(t)
+	plan := buildTestPlan(t, "judger", 1)
+	reportPath := filepath.Join(t.TempDir(), "report.json")
+	report := []byte(`{"schema":"iris-benchmark-qualification/v1","inventory_hostname":"host","nodename":"node","compatible":true,"verification":{"failures":[]}}` + "\n")
+	if err := os.WriteFile(reportPath, report, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	plan.Qualification.Report = &runplan.StagedFile{Path: reportPath, SHA256: artifact.HashBytes(report)}
+	a.planFile = filepath.Join(t.TempDir(), "plan.json")
+	if err := plan.WriteStore(a.planFile); err != nil {
+		t.Fatal(err)
+	}
+	sha, _ := plan.Digest()
+	_, terminal, err := execAgent(t, a, request(protocol.ActionInspect, sha, ""))
+	if err != nil || terminal.Status != protocol.StatusCompleted {
+		t.Fatalf("inspect err=%v terminal=%+v", err, terminal)
+	}
+	got, err := os.ReadFile(filepath.Join(a.runDir(testRunID), "qualification", "ansible-report.json"))
+	if err != nil || !bytes.Equal(got, report) {
+		t.Fatalf("qualification evidence = %q, %v", got, err)
+	}
+}
+
+func TestQualificationReportFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"schema", `{"schema":"other","inventory_hostname":"host","compatible":true,"verification":{"failures":[]}}`},
+		{"compatibility", `{"schema":"iris-benchmark-qualification/v1","inventory_hostname":"host","compatible":false,"verification":{"failures":[]}}`},
+		{"verification", `{"schema":"iris-benchmark-qualification/v1","inventory_hostname":"host","compatible":true,"verification":{"failures":["bad"]}}`},
+		{"missing-verification", `{"schema":"iris-benchmark-qualification/v1","inventory_hostname":"host","compatible":true}`},
+		{"identity", `{"schema":"iris-benchmark-qualification/v1","inventory_hostname":"other","compatible":true,"verification":{"failures":[]}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newTestAgent(t)
+			plan := buildTestPlan(t, "judger", 1)
+			path := filepath.Join(t.TempDir(), "report.json")
+			data := []byte(tc.body)
+			if err := os.WriteFile(path, data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			plan.Qualification.Report = &runplan.StagedFile{Path: path, SHA256: artifact.HashBytes(data)}
+			if err := a.validateQualificationReport(path, plan); err == nil {
+				t.Fatal("invalid qualification report accepted")
+			}
+		})
+	}
+}
+
+func TestPrepareRevalidatesQualificationEvidence(t *testing.T) {
+	a := newTestAgent(t)
+	plan := buildTestPlan(t, "judger", 1)
+	reportPath := filepath.Join(t.TempDir(), "report.json")
+	report := []byte(`{"schema":"iris-benchmark-qualification/v1","inventory_hostname":"host","compatible":true,"verification":{"failures":[]}}`)
+	if err := os.WriteFile(reportPath, report, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	plan.Qualification.Report = &runplan.StagedFile{Path: reportPath, SHA256: artifact.HashBytes(report)}
+	a.planFile = filepath.Join(t.TempDir(), "plan.json")
+	if err := plan.WriteStore(a.planFile); err != nil {
+		t.Fatal(err)
+	}
+	sha, _ := plan.Digest()
+	if _, _, err := execAgent(t, a, request(protocol.ActionInspect, sha, "")); err != nil {
+		t.Fatal(err)
+	}
+	evidence := filepath.Join(a.runDir(testRunID), "qualification", "ansible-report.json")
+	if err := os.WriteFile(evidence, []byte(`{"tampered":true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, terminal, err := execAgent(t, a, request(protocol.ActionPrepare, sha, ""))
+	if !errors.Is(err, errTerminalFailed) || terminal.Status != protocol.StatusFailed || !strings.Contains(terminal.Message, "sha256") {
+		t.Fatalf("prepare err=%v terminal=%+v", err, terminal)
+	}
+}
+
+func TestValidateRevalidatesQualificationEvidence(t *testing.T) {
+	a := newTestAgent(t)
+	plan := buildTestPlan(t, "judger", 1)
+	reportPath := filepath.Join(t.TempDir(), "report.json")
+	report := []byte(`{"schema":"iris-benchmark-qualification/v1","inventory_hostname":"host","compatible":true,"verification":{"failures":[]}}`)
+	if err := os.WriteFile(reportPath, report, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	plan.Qualification.Report = &runplan.StagedFile{Path: reportPath, SHA256: artifact.HashBytes(report)}
+	a.planFile = filepath.Join(t.TempDir(), "plan.json")
+	if err := plan.WriteStore(a.planFile); err != nil {
+		t.Fatal(err)
+	}
+	sha, _ := plan.Digest()
+	if _, _, err := execAgent(t, a, request(protocol.ActionInspect, sha, "")); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := execAgent(t, a, request(protocol.ActionPrepare, sha, "")); err != nil {
+		t.Fatal(err)
+	}
+	evidence := filepath.Join(a.runDir(testRunID), "qualification", "ansible-report.json")
+	if err := os.WriteFile(evidence, []byte(`{"tampered":true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, terminal, err := execAgent(t, a, request(protocol.ActionValidate, sha, ""))
+	if !errors.Is(err, errTerminalFailed) || terminal.Status != protocol.StatusFailed || !strings.Contains(terminal.Message, "sha256") {
+		t.Fatalf("validate err=%v terminal=%+v", err, terminal)
+	}
+	if _, statErr := os.Stat(filepath.Join(a.runDir(testRunID), "validated.json")); !os.IsNotExist(statErr) {
+		t.Fatal("tampered qualification evidence produced validated acceptance")
 	}
 }
 
@@ -155,6 +289,54 @@ func TestPrepareRejectsDigestMismatch(t *testing.T) {
 	}
 	if terminal.Status != protocol.StatusFailed {
 		t.Fatalf("terminal = %+v", terminal)
+	}
+}
+
+func TestPrepareRejectsFailedQualification(t *testing.T) {
+	a := newTestAgent(t)
+	sha := stageBuiltPlan(t, a, "judger", 1)
+	facts := filepath.Join(a.runDir(testRunID), "qualification", "host-facts.json")
+	if err := os.WriteFile(facts, []byte(`{"cgroupVersion":"v1","physicalCores":"4"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, terminal, err := execAgent(t, a, request(protocol.ActionPrepare, sha, ""))
+	if !errors.Is(err, errTerminalFailed) || terminal.Status != protocol.StatusFailed {
+		t.Fatalf("prepare err=%v terminal=%+v", err, terminal)
+	}
+	if _, err := os.Stat(filepath.Join(a.runDir(testRunID), "qualified.json")); !os.IsNotExist(err) {
+		t.Fatal("failed host qualification produced an acceptance record")
+	}
+}
+
+func TestPrepareRejectsLoadAboveSealedMaximum(t *testing.T) {
+	a := newTestAgent(t)
+	plan := buildTestPlan(t, "judger", 1)
+	plan.Qualification.MaxLoad1 = 1.0
+	a.planFile = filepath.Join(t.TempDir(), "plan.json")
+	if err := plan.WriteStore(a.planFile); err != nil {
+		t.Fatal(err)
+	}
+	sha, _ := plan.Digest()
+	if _, _, err := execAgent(t, a, request(protocol.ActionInspect, sha, "")); err != nil {
+		t.Fatal(err)
+	}
+	facts := filepath.Join(a.runDir(testRunID), "qualification", "host-facts.json")
+	if err := os.WriteFile(facts, []byte(`{"cgroupVersion":"v2","physicalCores":"4","load1":"1.01"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, terminal, err := execAgent(t, a, request(protocol.ActionPrepare, sha, ""))
+	if !errors.Is(err, errTerminalFailed) || terminal.Status != protocol.StatusFailed || !strings.Contains(terminal.Message, "load1") {
+		t.Fatalf("prepare err=%v terminal=%+v", err, terminal)
+	}
+}
+
+func TestPrepareRejectsAgentVersionMismatch(t *testing.T) {
+	a := newTestAgent(t)
+	sha := stageBuiltPlan(t, a, "judger", 1)
+	a.version = "different"
+	_, terminal, err := execAgent(t, a, request(protocol.ActionPrepare, sha, ""))
+	if !errors.Is(err, errTerminalFailed) || terminal.Status != protocol.StatusFailed || !strings.Contains(terminal.Message, "version") {
+		t.Fatalf("prepare err=%v terminal=%+v", err, terminal)
 	}
 }
 
@@ -191,6 +373,11 @@ func TestBundleBuildsInventory(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(a.runDir(testRunID), "samples.ndjson"), []byte("{}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	for _, action := range []string{"validated", "cleaned"} {
+		if _, err := a.writeRecord(testRunID, sha, action, "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
 	events, terminal, err := execAgent(t, a, request(protocol.ActionBundle, sha, ""))
 	if err != nil {
 		t.Fatal(err)
@@ -209,6 +396,22 @@ func TestBundleBuildsInventory(t *testing.T) {
 	}
 	if !artifactEvent {
 		t.Fatal("no artifact event for inventory")
+	}
+	if _, _, err := execAgent(t, a, request(protocol.ActionBundle, sha, "")); err != nil {
+		t.Fatalf("second bundle: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(a.runDir(testRunID), "bundle-inventory.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var inv artifact.Inventory
+	if err := json.Unmarshal(data, &inv); err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range inv.Entries {
+		if entry.Path == "bundle-inventory.json" {
+			t.Fatal("inventory included its previous version")
+		}
 	}
 }
 
@@ -261,6 +464,11 @@ func stageReadyRun(t *testing.T, a *agent, suite string, workers int) string {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "qualification", "host-facts.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	qualified := record{RunID: testRunID, PlanSHA256: sha, AgentVersion: "test", Action: "qualified", At: time.Now().UTC()}
+	qualifiedData, _ := json.MarshalIndent(qualified, "", "  ")
+	if err := os.WriteFile(filepath.Join(dir, "qualified.json"), append(qualifiedData, '\n'), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	rec := record{RunID: testRunID, PlanSHA256: sha, AgentVersion: "test", Action: "prepared", At: time.Now().UTC()}
@@ -351,7 +559,35 @@ func (f *agentTestFS) Stat(name string) (fs.FileInfo, error) {
 	return nil, fmt.Errorf("stat %s: %w", name, fs.ErrNotExist)
 }
 func (f *agentTestFS) ReadDir(name string) ([]fs.DirEntry, error) {
-	return nil, fmt.Errorf("readdir %s: %w", name, fs.ErrNotExist)
+	clean := path.Clean(name)
+	if !f.dirs[clean] {
+		return nil, fmt.Errorf("readdir %s: %w", name, fs.ErrNotExist)
+	}
+	seen := map[string]bool{}
+	prefix := clean + "/"
+	add := func(p string, isDir bool) {
+		rest := strings.TrimPrefix(p, prefix)
+		if i := strings.IndexByte(rest, '/'); i >= 0 {
+			rest = rest[:i]
+		}
+		seen[rest] = isDir
+	}
+	for k := range f.files {
+		if strings.HasPrefix(k, prefix) {
+			add(k, false)
+		}
+	}
+	for k := range f.dirs {
+		if k != clean && strings.HasPrefix(k, prefix) {
+			add(k, true)
+		}
+	}
+	out := make([]fs.DirEntry, 0, len(seen))
+	for n, isDir := range seen {
+		out = append(out, agentTestInfo{name: n, dir: isDir})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name() < out[j].Name() })
+	return out, nil
 }
 
 type agentTestInfo struct {
@@ -410,6 +646,12 @@ type agentTestLauncher struct {
 	specs   []experiment.WorkerSpec
 }
 
+type staticTelemetry struct{}
+
+func (staticTelemetry) Snapshot() (telemetry.Snapshot, error) {
+	return telemetry.Snapshot{TemperaturesMilliC: map[string]int64{"test-zone": 42000}}, nil
+}
+
 func (l *agentTestLauncher) Start(_ context.Context, spec experiment.WorkerSpec, h containment.Handle) (experiment.Worker, error) {
 	pid := 5000 + len(l.workers)
 	w := &agentTestWorker{pid: pid, done: make(chan struct{}), release: make(chan struct{})}
@@ -422,8 +664,9 @@ func (l *agentTestLauncher) Start(_ context.Context, spec experiment.WorkerSpec,
 		<-w.release
 		var b strings.Builder
 		for i := 0; i < spec.ExpectedSamples; i++ {
-			fmt.Fprintf(&b, "{\"runId\":%q,\"blockId\":\"block-01\",\"worker\":%q,\"cgroupPath\":%q,\"cgroupContained\":true,\"iteration\":%d}\n",
-				testRunID, spec.ID, filepath.Join(h.FSPath(), "sandbox-"+spec.ID), i)
+			started := int64(1_700_000_000_000_000_000) + int64(i)*1000
+			fmt.Fprintf(&b, "{\"runId\":%q,\"blockId\":\"block-01\",\"worker\":%q,\"cgroupPath\":%q,\"cgroupContained\":true,\"iteration\":%d,\"status\":\"success\",\"outputMatches\":true,\"containmentMode\":\"isolated\",\"comparable\":true,\"startedAtNs\":%d,\"endedAtNs\":%d}\n",
+				testRunID, spec.ID, filepath.Join(h.FSPath(), "sandbox-"+spec.ID), i, started, started+500)
 		}
 		_ = os.WriteFile(spec.OutputPath, []byte(b.String()), 0o644)
 		close(w.done)
@@ -454,7 +697,6 @@ func newRunBlockAgent(t *testing.T) (*agent, *agentTestFS, *agentTestProc, *agen
 	a.cgroupParent = "/sys/fs/cgroup/iris-bench"
 	a.cgroupMount = "/sys/fs/cgroup"
 	a.cpusetMems = "0"
-	a.benchBinary = "/bin/true"
 	a.workerBin = "/bin/true"
 	a.monitorInterval = time.Millisecond
 	fakeFS := newAgentTestFS()
@@ -467,6 +709,7 @@ func newRunBlockAgent(t *testing.T) (*agent, *agentTestFS, *agentTestProc, *agen
 	a.cgroupFS = fakeFS
 	a.cgroupProc = proc
 	a.newLauncher = func(int) (experiment.Launcher, error) { return launcher, nil }
+	a.telemetry = staticTelemetry{}
 	return a, fakeFS, proc, launcher
 }
 
@@ -480,7 +723,7 @@ func TestRunBlockHappyPath(t *testing.T) {
 	if terminal.Status != protocol.StatusCompleted {
 		t.Fatalf("terminal = %+v", terminal)
 	}
-	if _, err := os.Stat(filepath.Join(a.runDir(testRunID), "samples", "judger.ndjson")); err != nil {
+	if _, err := os.Stat(filepath.Join(a.runDir(testRunID), "samples", "block-01.ndjson")); err != nil {
 		t.Fatal("samples missing")
 	}
 	if _, err := os.Stat(filepath.Join(a.runDir(testRunID), "receipts", "block-01.json")); err != nil {
@@ -508,6 +751,21 @@ func TestRunBlockHappyPath(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsMissingBlockTelemetry(t *testing.T) {
+	a, _, _, _ := newRunBlockAgent(t)
+	sha := stageReadyRun(t, a, "judger", 1)
+	if _, _, err := execAgent(t, a, request(protocol.ActionRunBlock, sha, "block-01")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(a.runDir(testRunID), "telemetry", "thermal-block-01.ndjson")); err != nil {
+		t.Fatal(err)
+	}
+	_, terminal, err := execAgent(t, a, request(protocol.ActionValidate, sha, ""))
+	if !errors.Is(err, errTerminalFailed) || terminal.Status != protocol.StatusFailed || !strings.Contains(terminal.Message, "telemetry") {
+		t.Fatalf("validate err=%v terminal=%+v", err, terminal)
+	}
+}
+
 func TestRunBlockRejectsIrisSuite(t *testing.T) {
 	a, _, _, _ := newRunBlockAgent(t)
 	sha := stageReadyRun(t, a, "iris", 1)
@@ -522,24 +780,62 @@ func TestRunBlockRejectsIrisSuite(t *testing.T) {
 
 func TestBuildWorkerSpecsRejectsMissingCPUs(t *testing.T) {
 	a := newTestAgent(t)
-	a.benchBinary = "/bin/true"
 	_, err := a.buildWorkerSpecs(request(protocol.ActionRunBlock, strings.Repeat("a", 64), "block-01"), runplan.Block{ID: "block-01", Suite: "judger", Workers: 2, Repetitions: 1}, runplan.Plan{})
 	if err == nil {
 		t.Fatal("expected missing cpu list error")
 	}
 }
 
+func TestBuildWorkerSpecsRejectsFixtureMismatch(t *testing.T) {
+	a := newTestAgent(t)
+	a.cgroupParent = "/sys/fs/cgroup/iris-bench"
+	a.workerBin = "/bin/true"
+	plan := buildTestPlan(t, "judger", 1)
+	if err := os.WriteFile(plan.Fixtures[0].Path, []byte("tampered\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := a.buildWorkerSpecs(request(protocol.ActionRunBlock, strings.Repeat("a", 64), "block-01"), plan.Blocks[0], plan)
+	if err == nil || !strings.Contains(err.Error(), "does not match sealed") {
+		t.Fatalf("fixture mismatch error = %v", err)
+	}
+}
+
+func TestBuildWorkerSpecsRejectsWorkloadMismatch(t *testing.T) {
+	a := newTestAgent(t)
+	a.cgroupParent = "/sys/fs/cgroup/iris-bench"
+	a.workerBin = "/bin/true"
+	plan := buildTestPlan(t, "judger", 1)
+	plan.WorkloadBinary.SHA256 = strings.Repeat("f", 64)
+	_, err := a.buildWorkerSpecs(request(protocol.ActionRunBlock, strings.Repeat("a", 64), "block-01"), plan.Blocks[0], plan)
+	if err == nil || !strings.Contains(err.Error(), "workload binary sha256") {
+		t.Fatalf("workload mismatch error = %v", err)
+	}
+}
+
 func TestWorkerArgumentsTemplate(t *testing.T) {
 	a := newTestAgent(t)
 	a.workerArgs = []string{"--worker", "{worker}", "--out", "{output}"}
-	got, err := a.workerArguments("worker-01", runplan.Block{ID: "b", Repetitions: 3}, runplan.Plan{RunID: testRunID}, "0", "/tmp/o", "fix",
-		"/sys/fs/cgroup/iris-bench/run/b/worker-01", "run-b-worker-01", strings.Repeat("b", 64), 2*time.Second)
+	got, err := a.workerArguments("worker-01", runplan.Block{ID: "b", Repetitions: 3}, runplan.Plan{RunID: testRunID}, "0", "/tmp/o", runplan.Fixture{Name: "fix"},
+		"/bin/true", "/sys/fs/cgroup/iris-bench/run/b/worker-01", "run-b-worker-01", strings.Repeat("b", 64), "", 2*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := []string{"--worker", "worker-01", "--out", "/tmp/o"}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("got %v want %v", got, want)
+	}
+}
+
+func TestWorkerArgumentsAlwaysForwardProductionCompat(t *testing.T) {
+	a := newTestAgent(t)
+	a.workerArgs = []string{"--worker", "{worker}"}
+	got, err := a.workerArguments("worker-01", runplan.Block{ID: "b", Repetitions: 1}, runplan.Plan{RunID: testRunID, ContainmentMode: runplan.ContainmentProductionCompat}, "0", "/tmp/o", runplan.Fixture{Name: "fix"},
+		"/bin/true", "/sys/fs/cgroup/iris-bench/run/b/worker-01", "run-b-worker-01", strings.Repeat("b", 64), "", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsArgument(got, "--production-compat") {
+		t.Fatalf("custom args omitted production compatibility: %v", got)
 	}
 }
 
@@ -559,14 +855,16 @@ func TestVerifyPlanMatchesAcceptsCanonicalDigest(t *testing.T) {
 		t.Fatal(err)
 	}
 	plan, err := runplan.Build(runplan.BuildInput{
-		ToolVersion:  "test",
-		RunID:        testRunID,
-		Target:       runplan.Target{SSHAlias: "host"},
-		Suite:        "judger",
-		Profile:      "isolated",
-		Images:       map[string]runplan.Image{"iris": {Reference: runplan.DefaultIrisImage, Digest: "sha256:" + strings.Repeat("a", 64)}},
-		JudgerDigest: "sha256:" + strings.Repeat("b", 64),
-		Blocks:       []runplan.Block{{ID: "block-01", Suite: "judger", Profile: "isolated", Workers: 1, CPUList: "0", Repetitions: 1}},
+		ToolVersion:    "test",
+		RunID:          testRunID,
+		Target:         runplan.Target{SSHAlias: "host"},
+		Suite:          "judger",
+		Profile:        "isolated",
+		Images:         map[string]runplan.Image{"iris": {Reference: runplan.DefaultIrisImage, Digest: "sha256:" + strings.Repeat("a", 64)}},
+		JudgerDigest:   "sha256:" + strings.Repeat("b", 64),
+		WorkloadBinary: runplan.StagedFile{Path: "/tmp/workload", SHA256: strings.Repeat("c", 64)},
+		Qualification:  runplan.Qualification{MaxLoad1: 1.0},
+		Blocks:         []runplan.Block{{ID: "block-01", Suite: "judger", Profile: "isolated", Workers: 1, CPUList: "0", Repetitions: 1}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -619,7 +917,6 @@ func TestVerifyPlanMatchesRejectsStagedFileHash(t *testing.T) {
 func TestBuildWorkerSpecsDefaultArgsCarryJudgerContext(t *testing.T) {
 	a := newTestAgent(t)
 	a.cgroupParent = "/sys/fs/cgroup/iris-bench"
-	a.benchBinary = "/bin/true"
 	a.workerBin = "/bin/true"
 	plan := buildTestPlan(t, "judger", 1)
 	specs, err := a.buildWorkerSpecs(request(protocol.ActionRunBlock, strings.Repeat("a", 64), "block-01"), plan.Blocks[0], plan)
@@ -630,7 +927,11 @@ func TestBuildWorkerSpecsDefaultArgsCarryJudgerContext(t *testing.T) {
 		t.Fatalf("specs = %d", len(specs))
 	}
 	joined := strings.Join(specs[0].Args, " ")
-	expectedParent := filepath.Join(a.cgroupParent, testRunID, "block-01", "worker-01")
+	subtree, err := experiment.SubtreeName(testRunID, "block-01", "worker-01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedParent := filepath.Join(a.cgroupParent, subtree)
 	for _, want := range []string{
 		"--container-id " + testRunID + "-block-01-worker-01",
 		"--expected-cgroup-parent " + expectedParent,
@@ -641,6 +942,19 @@ func TestBuildWorkerSpecsDefaultArgsCarryJudgerContext(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("default args missing %q in %v", want, specs[0].Args)
 		}
+	}
+}
+
+func TestWorkerContainerIDPreservesUniqueSuffixAfterTruncation(t *testing.T) {
+	plan := runplan.Plan{RunID: strings.Repeat("r", 128)}
+	block := runplan.Block{ID: strings.Repeat("b", 128)}
+	one := workerContainerID(strings.Repeat("x", 256), plan, block, "worker-01")
+	two := workerContainerID(strings.Repeat("x", 256), plan, block, "worker-02")
+	if len(one) != 128 || len(two) != 128 {
+		t.Fatalf("container ID lengths = %d/%d, want 128", len(one), len(two))
+	}
+	if one == two || !strings.HasSuffix(one, "-worker-01") || !strings.HasSuffix(two, "-worker-02") {
+		t.Fatalf("worker suffixes collided or were truncated: %q / %q", one, two)
 	}
 }
 
@@ -655,6 +969,317 @@ func TestPlanJudgerSHAFromPlan(t *testing.T) {
 	got, err := a.planJudgerSHA(plan)
 	if err != nil || got != strings.Repeat("b", 64) {
 		t.Fatalf("planJudgerSHA = %q, %v", got, err)
+	}
+}
+
+func TestPlanBenchmarkImageMustMatchSealedPlan(t *testing.T) {
+	a := newTestAgent(t)
+	plan := buildTestPlan(t, "judger", 1)
+	imageID := "sha256:" + strings.Repeat("d", 64)
+	plan.Images["judger-bench"] = runplan.Image{Reference: imageID, Digest: imageID}
+	if _, _, err := a.planBenchmarkImage(plan); err == nil {
+		t.Fatal("missing forwarded benchmark image accepted")
+	}
+	a.benchmarkImage = "sha256:" + strings.Repeat("e", 64)
+	if _, _, err := a.planBenchmarkImage(plan); err == nil {
+		t.Fatal("mismatched forwarded benchmark image accepted")
+	}
+	a.benchmarkImage = imageID
+	got, oci, err := a.planBenchmarkImage(plan)
+	if err != nil || !oci || got != imageID {
+		t.Fatalf("planBenchmarkImage = %q, %v, %v", got, oci, err)
+	}
+}
+
+func TestBuildWorkerSpecsOCIUsesDockerArgvAndImageJudger(t *testing.T) {
+	a := newTestAgent(t)
+	a.cgroupParent = "/sys/fs/cgroup/iris-bench"
+	a.cgroupMount = "/sys/fs/cgroup"
+	a.cpusetMems = "1"
+	a.workerBin = "/host/judger-bench"
+	plan := buildTestPlan(t, "judger", 1)
+	imageID := "sha256:" + strings.Repeat("d", 64)
+	plan.Images["judger-bench"] = runplan.Image{Reference: imageID, Digest: imageID}
+	plan.ContainmentMode = runplan.ContainmentProductionCompat
+	a.benchmarkImage = imageID
+	specs, err := a.buildWorkerSpecs(request(protocol.ActionRunBlock, strings.Repeat("a", 64), "block-01"), plan.Blocks[0], plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(specs) != 1 || specs[0].Command != "docker" {
+		t.Fatalf("OCI worker specs = %+v", specs)
+	}
+	joined := strings.Join(specs[0].Args, " ")
+	outputDir := filepath.Dir(specs[0].OutputPath)
+	for _, want := range []string{
+		"run --rm",
+		"--name iris-bench-" + testRunID + "-block-01-worker-01",
+		"--privileged --cgroupns=host",
+		"--cpuset-cpus 0-3 --cpuset-mems 1",
+		"--mount type=bind,src=/sys/fs/cgroup,dst=/sys/fs/cgroup",
+		"--mount type=bind,src=" + plan.WorkloadBinary.Path + ",dst=" + plan.WorkloadBinary.Path + ",readonly",
+		"--mount type=bind,src=" + plan.Fixtures[0].ExpectedOutputPath + ",dst=" + plan.Fixtures[0].ExpectedOutputPath + ",readonly",
+		"--mount type=bind,src=" + outputDir + ",dst=" + outputDir,
+		imageID + " --mode execute",
+		"--judger " + ociJudgerPath,
+		"--judger-sha256 " + strings.Repeat("b", 64),
+		"--production-compat",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("docker argv missing %q in %v", want, specs[0].Args)
+		}
+	}
+	if strings.Contains(joined, "/host/judger-bench") {
+		t.Fatalf("OCI argv uses host worker/Judger path: %v", specs[0].Args)
+	}
+}
+
+type fakeDockerRunner struct {
+	outputs []string
+	errs    []error
+	calls   []string
+}
+
+func (f *fakeDockerRunner) Output(_ context.Context, name string, args ...string) ([]byte, error) {
+	f.calls = append(f.calls, strings.Join(append([]string{name}, args...), " "))
+	i := len(f.calls) - 1
+	var err error
+	if i < len(f.errs) {
+		err = f.errs[i]
+	}
+	if i < len(f.outputs) {
+		return []byte(f.outputs[i]), err
+	}
+	return nil, err
+}
+
+func TestCleanupContainersRemovesOnlyExpectedRunScopedNames(t *testing.T) {
+	plan := buildTestPlan(t, "judger", 1)
+	name := dockerContainerName(plan, plan.Blocks[0], "worker-01")
+	runner := &fakeDockerRunner{outputs: []string{name + "\n", "removed\n", ""}}
+	a := newTestAgent(t)
+	a.dockerRunner = runner
+	if err := a.cleanupContainers(context.Background(), plan.RunID, plan.Blocks[0].ID, []string{name}); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 3 || !strings.Contains(runner.calls[1], "docker container rm -f "+name) {
+		t.Fatalf("Docker cleanup calls = %v", runner.calls)
+	}
+}
+
+func TestCleanupContainersRejectsUnexpectedLabeledContainer(t *testing.T) {
+	plan := buildTestPlan(t, "judger", 1)
+	name := dockerContainerName(plan, plan.Blocks[0], "worker-01")
+	a := newTestAgent(t)
+	a.dockerRunner = &fakeDockerRunner{outputs: []string{"other-container\n"}}
+	if err := a.cleanupContainers(context.Background(), plan.RunID, plan.Blocks[0].ID, []string{name}); err == nil || !strings.Contains(err.Error(), "unexpected container") {
+		t.Fatalf("cleanup error = %v", err)
+	}
+}
+
+func TestDockerContainerNameRemainsValidAndUniqueWhenTruncated(t *testing.T) {
+	plan := runplan.Plan{RunID: strings.Repeat("r", 128)}
+	block := runplan.Block{ID: strings.Repeat("b", 128)}
+	one := dockerContainerName(plan, block, "worker-01")
+	two := dockerContainerName(plan, block, "worker-02")
+	if !dockerNamePattern.MatchString(one) || !dockerNamePattern.MatchString(two) || one == two {
+		t.Fatalf("invalid or colliding Docker names %q / %q", one, two)
+	}
+}
+
+func cleanupTestManager(a *agent) *containment.Manager {
+	return &containment.Manager{Mount: a.mount(), FS: a.cgroupFS, Proc: a.cgroupProc}
+}
+
+func TestCleanupSandboxRootRunsArgvOnlySealedHelper(t *testing.T) {
+	a, fakeFS, _, _ := newRunBlockAgent(t)
+	plan := buildTestPlan(t, "judger", 1)
+	imageID := "sha256:" + strings.Repeat("d", 64)
+	plan.Images["judger-bench"] = runplan.Image{Reference: imageID, Digest: imageID}
+	block := plan.Blocks[0]
+	fakeFS.mkdir("/sys/fs/cgroup/sandbox-run-worker-01")
+	fakeFS.put("/sys/fs/cgroup/sandbox-run-worker-01/cgroup.procs", "")
+	for _, b := range []string{"box-5", "box-1", "box-3", "box-2", "box-4"} {
+		fakeFS.mkdir("/sys/fs/cgroup/sandbox-run-worker-01/" + b)
+		fakeFS.put("/sys/fs/cgroup/sandbox-run-worker-01/"+b+"/cgroup.procs", "")
+	}
+	runner := &fakeDockerRunner{outputs: []string{""}}
+	a.dockerRunner = runner
+
+	if err := a.cleanupSandboxRoot(context.Background(), cleanupTestManager(a), plan, block, imageID, "/sandbox-run-worker-01"); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("docker calls = %v, want exactly one", runner.calls)
+	}
+	call := runner.calls[0]
+	for _, want := range []string{
+		"docker run --rm",
+		"--name " + dockerCleanupContainerName(plan, block, "/sandbox-run-worker-01"),
+		"--label iris-bench.run=" + plan.RunID,
+		"--label iris-bench.block=" + block.ID,
+		"--privileged --cgroupns=host",
+		"--entrypoint /bin/rmdir",
+		"--mount type=bind,src=/sys/fs/cgroup,dst=/sys/fs/cgroup",
+	} {
+		if !strings.Contains(call, want) {
+			t.Fatalf("cleanup argv missing %q in %q", want, call)
+		}
+	}
+	// rmdir gets every validated path in one argv, children first and root last.
+	wantPaths := imageID +
+		" /sys/fs/cgroup/sandbox-run-worker-01/box-1" +
+		" /sys/fs/cgroup/sandbox-run-worker-01/box-2" +
+		" /sys/fs/cgroup/sandbox-run-worker-01/box-3" +
+		" /sys/fs/cgroup/sandbox-run-worker-01/box-4" +
+		" /sys/fs/cgroup/sandbox-run-worker-01/box-5" +
+		" /sys/fs/cgroup/sandbox-run-worker-01"
+	if !strings.HasSuffix(call, wantPaths) {
+		t.Fatalf("cleanup argv tail = %q, want suffix %q", call, wantPaths)
+	}
+	for _, forbidden := range []string{"sh -c", "/bin/sh", "bash"} {
+		if strings.Contains(call, forbidden) {
+			t.Fatalf("cleanup argv used a shell (%q): %q", forbidden, call)
+		}
+	}
+}
+
+func TestCleanupSandboxRootRefusesUnexpectedResidue(t *testing.T) {
+	cases := []struct {
+		name    string
+		box     string
+		boxProc string
+		extra   string
+		wantErr error
+	}{
+		{"box-member", "box-1", "7\n", "", containment.ErrNotEmpty},
+		{"grandchild", "box-1", "", "box-1/grand-1", containment.ErrNotEmpty},
+		{"unexpected-child", "other", "", "", containment.ErrInvalid},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a, fakeFS, _, _ := newRunBlockAgent(t)
+			plan := buildTestPlan(t, "judger", 1)
+			imageID := "sha256:" + strings.Repeat("d", 64)
+			fakeFS.mkdir("/sys/fs/cgroup/sandbox-run-worker-01")
+			fakeFS.put("/sys/fs/cgroup/sandbox-run-worker-01/cgroup.procs", "")
+			fakeFS.mkdir("/sys/fs/cgroup/sandbox-run-worker-01/" + tc.box)
+			fakeFS.put("/sys/fs/cgroup/sandbox-run-worker-01/"+tc.box+"/cgroup.procs", tc.boxProc)
+			if tc.extra != "" {
+				fakeFS.mkdir("/sys/fs/cgroup/sandbox-run-worker-01/" + tc.extra)
+			}
+			runner := &fakeDockerRunner{}
+			a.dockerRunner = runner
+
+			err := a.cleanupSandboxRoot(context.Background(), cleanupTestManager(a), plan, plan.Blocks[0], imageID, "/sandbox-run-worker-01")
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("err = %v, want %v", err, tc.wantErr)
+			}
+			if len(runner.calls) != 0 {
+				t.Fatalf("docker ran for residual evidence: %v", runner.calls)
+			}
+			if !fakeFS.dirs["/sys/fs/cgroup/sandbox-run-worker-01"] {
+				t.Fatal("residual root was mutated")
+			}
+		})
+	}
+}
+
+func TestCleanupSandboxRootRefusesNonEmptyRoot(t *testing.T) {
+	a, fakeFS, _, _ := newRunBlockAgent(t)
+	plan := buildTestPlan(t, "judger", 1)
+	imageID := "sha256:" + strings.Repeat("d", 64)
+	fakeFS.mkdir("/sys/fs/cgroup/sandbox-run-worker-01")
+	fakeFS.put("/sys/fs/cgroup/sandbox-run-worker-01/cgroup.procs", "4242\n")
+	runner := &fakeDockerRunner{}
+	a.dockerRunner = runner
+
+	err := a.cleanupSandboxRoot(context.Background(), cleanupTestManager(a), plan, plan.Blocks[0], imageID, "/sandbox-run-worker-01")
+	if !errors.Is(err, containment.ErrNotEmpty) {
+		t.Fatalf("err = %v, want ErrNotEmpty", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("docker ran for a non-empty root: %v", runner.calls)
+	}
+	if !fakeFS.dirs["/sys/fs/cgroup/sandbox-run-worker-01"] {
+		t.Fatal("non-empty root was mutated")
+	}
+}
+
+func TestCleanupSandboxRootSkipsAbsentRoot(t *testing.T) {
+	a, _, _, _ := newRunBlockAgent(t)
+	plan := buildTestPlan(t, "judger", 1)
+	imageID := "sha256:" + strings.Repeat("d", 64)
+	runner := &fakeDockerRunner{}
+	a.dockerRunner = runner
+
+	if err := a.cleanupSandboxRoot(context.Background(), cleanupTestManager(a), plan, plan.Blocks[0], imageID, "/sandbox-absent"); err != nil {
+		t.Fatalf("absent root = %v", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("docker ran for an absent root: %v", runner.calls)
+	}
+}
+
+func TestCleanupSandboxRootRejectsUnsealedImage(t *testing.T) {
+	a, fakeFS, _, _ := newRunBlockAgent(t)
+	plan := buildTestPlan(t, "judger", 1)
+	fakeFS.mkdir("/sys/fs/cgroup/sandbox-run-worker-01")
+	fakeFS.put("/sys/fs/cgroup/sandbox-run-worker-01/cgroup.procs", "")
+	runner := &fakeDockerRunner{}
+	a.dockerRunner = runner
+
+	err := a.cleanupSandboxRoot(context.Background(), cleanupTestManager(a), plan, plan.Blocks[0], "judger-bench:latest", "/sandbox-run-worker-01")
+	if err == nil || !strings.Contains(err.Error(), "sealed immutable image id") {
+		t.Fatalf("err = %v, want unsealed-image rejection", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("docker ran with an unsealed image: %v", runner.calls)
+	}
+}
+
+func TestBlockCoordinatorInjectsCleanupOnlyForOCI(t *testing.T) {
+	a, _, _, _ := newRunBlockAgent(t)
+	plan := buildTestPlan(t, "judger", 1)
+	block := plan.Blocks[0]
+	enc := protocol.NewEventEncoder(io.Discard)
+	host := a.newBlockCoordinator(cleanupTestManager(a), plan, block, "", enc, false)
+	if host.CleanupSandboxRoot != nil {
+		t.Fatal("host mode injected an OCI cleanup callback")
+	}
+	imageID := "sha256:" + strings.Repeat("d", 64)
+	oci := a.newBlockCoordinator(cleanupTestManager(a), plan, block, imageID, enc, true)
+	if oci.CleanupSandboxRoot == nil {
+		t.Fatal("OCI mode did not inject a cleanup callback")
+	}
+}
+
+func TestDockerCleanupContainerNameIsRunScopedAndValid(t *testing.T) {
+	plan := runplan.Plan{RunID: testRunID}
+	block := runplan.Block{ID: "block-01"}
+	name := dockerCleanupContainerName(plan, block, "/sandbox-run-worker-01")
+	if !dockerNamePattern.MatchString(name) || !strings.HasPrefix(name, "iris-bench-") {
+		t.Fatalf("invalid helper name %q", name)
+	}
+	if !strings.Contains(name, "cleanup-sandbox-run-worker-01") || !strings.Contains(name, testRunID) {
+		t.Fatalf("helper name %q is not run- and root-scoped", name)
+	}
+	if name == dockerContainerName(plan, block, "worker-01") {
+		t.Fatalf("helper name collides with a worker name: %q", name)
+	}
+}
+
+func TestDockerCleanupContainerNamesIncludesOnlyAcceptedRoots(t *testing.T) {
+	plan := runplan.Plan{RunID: testRunID}
+	block := runplan.Block{ID: "block-01"}
+	specs := []experiment.WorkerSpec{
+		{ID: "worker-01", AcceptedUncontainedCgroup: "/sandbox-a"},
+		{ID: "worker-02"},
+		{ID: "worker-03", AcceptedUncontainedCgroup: "/sandbox-a"},
+	}
+	names := dockerCleanupContainerNames(plan, block, specs)
+	if len(names) != 1 || names[0] != dockerCleanupContainerName(plan, block, "/sandbox-a") {
+		t.Fatalf("helper names = %v", names)
 	}
 }
 

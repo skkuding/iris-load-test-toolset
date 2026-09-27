@@ -208,8 +208,8 @@
       - /bin/sh
       - -c
       - >-
-        echo "bios_version=$(dmidecode -s bios-version 2>/dev/null || echo unknown)";
-        echo "board_name=$(dmidecode -s baseboard-product-name 2>/dev/null || echo unknown)";
+        echo "bios_version=$(cat /sys/class/dmi/id/bios_version 2>/dev/null || echo unknown)";
+        echo "board_name=$(cat /sys/class/dmi/id/board_name 2>/dev/null || echo unknown)";
         echo "microcode=$(cat /sys/devices/system/cpu/cpu0/microcode/version 2>/dev/null || echo unknown)";
         echo "cpu_vendor=$(lscpu | sed -n 's/^Vendor ID:[[:space:]]*//p' | head -1)";
         echo "cpu_model=$(lscpu | sed -n 's/^Model name:[[:space:]]*//p' | head -1)"

@@ -70,15 +70,20 @@ type Paths struct {
 	BinRoot    string `json:"binRoot,omitempty"`
 	SocketDir  string `json:"socketDir,omitempty"`
 	ResultRoot string `json:"resultRoot,omitempty"`
+	// SSHControlPath optionally pins the exact OpenSSH ControlPath. When set it
+	// overrides the derived "<socketDir>/iris-bench-<host>" so an operator's
+	// existing control socket can be reused. A leading "~" is expanded.
+	SSHControlPath string `json:"sshControlPath,omitempty"`
 }
 
 // Limits bounds run scope.
 type Limits struct {
-	MaxWorkers         int `json:"maxWorkers,omitempty"`
-	MaxRunSeconds      int `json:"maxRunSeconds,omitempty"`
-	MaxQueueDepth      int `json:"maxQueueDepth,omitempty"`
-	MaxDiskMiB         int `json:"maxDiskMiB,omitempty"`
-	StopOnErrorRatePct int `json:"stopOnErrorRatePct,omitempty"`
+	MaxWorkers         int     `json:"maxWorkers,omitempty"`
+	MaxRunSeconds      int     `json:"maxRunSeconds,omitempty"`
+	MaxLoad1           float64 `json:"maxLoad1,omitempty"`
+	MaxQueueDepth      int     `json:"maxQueueDepth,omitempty"`
+	MaxDiskMiB         int     `json:"maxDiskMiB,omitempty"`
+	StopOnErrorRatePct int     `json:"stopOnErrorRatePct,omitempty"`
 }
 
 var cpuListPattern = regexp.MustCompile(`^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$`)
@@ -97,7 +102,7 @@ func Default() Config {
 			SocketDir:  DefaultSockets,
 			ResultRoot: "runs",
 		},
-		Limits: Limits{MaxWorkers: 32, MaxRunSeconds: 3600, MaxQueueDepth: 100000, MaxDiskMiB: 40960},
+		Limits: Limits{MaxWorkers: 32, MaxRunSeconds: 3600, MaxLoad1: 1.0, MaxQueueDepth: 100000, MaxDiskMiB: 40960},
 	}
 }
 
@@ -168,6 +173,9 @@ func (c *Config) ApplyDefaults() {
 	if c.Limits.MaxRunSeconds == 0 {
 		c.Limits.MaxRunSeconds = d.Limits.MaxRunSeconds
 	}
+	if c.Limits.MaxLoad1 == 0 {
+		c.Limits.MaxLoad1 = d.Limits.MaxLoad1
+	}
 	if c.Limits.MaxQueueDepth == 0 {
 		c.Limits.MaxQueueDepth = d.Limits.MaxQueueDepth
 	}
@@ -229,11 +237,17 @@ func (c Config) Validate() error {
 	if c.Paths.SocketDir == "" {
 		return errors.New("config: paths.socketDir is required")
 	}
+	if strings.ContainsAny(c.Paths.SSHControlPath, "\x00\n\r") {
+		return errors.New("config: paths.sshControlPath contains control characters")
+	}
 	if c.Limits.MaxWorkers < 1 {
 		return errors.New("config: limits.maxWorkers must be positive")
 	}
 	if c.Limits.MaxRunSeconds < 1 {
 		return errors.New("config: limits.maxRunSeconds must be positive")
+	}
+	if c.Limits.MaxLoad1 <= 0 {
+		return errors.New("config: limits.maxLoad1 must be positive")
 	}
 	return nil
 }

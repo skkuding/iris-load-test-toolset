@@ -4,10 +4,9 @@
 # Usage:
 #   scripts/qualify-host.sh                 # defaults to codedang8
 #   scripts/qualify-host.sh codedang8
-#   scripts/qualify-host.sh codedang8 --ask-become-pass
 #   IRIS_BENCH_REPORT_DIR=~/iris-bench-reports scripts/qualify-host.sh codedang8
 #
-# This never mutates the target. It gathers effective host state, evaluates
+# This never mutates the target or escalates privileges. It gathers effective host state, evaluates
 # config/compatibility.yaml, and writes a JSON report under
 # IRIS_BENCH_REPORT_DIR (default /tmp/iris-bench-qualification).
 #

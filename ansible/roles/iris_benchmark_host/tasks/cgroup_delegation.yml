@@ -3,9 +3,9 @@
 #
 # The agent needs a delegated subtree it can manage without unrestricted sudo.
 # This role provides:
-#   - a delegated iris-bench.slice for containers, RabbitMQ, Iris, and sandboxes;
-#   - a user-manager delegate drop-in so the benchmark user can create cgroup
-#     subtrees below its own slice;
+#   - an iris-bench.slice for accounting of future system units;
+#   - a user-manager delegate drop-in so the SSH benchmark operator can create
+#     per-run subtrees without passwordless root;
 #   - explicit system limits.
 # It never writes to /sys/fs/cgroup directly and never touches another user's
 # delegated cgroups.
@@ -72,10 +72,9 @@
     mode: "0644"
     content: |
       # Managed by the iris_benchmark_host Ansible role.
-      # Delegate cpu/cpuset/memory/pids/io so the benchmark agent can create
-      # per-run and per-worker subtrees without touching the host root cgroup.
+      # Account future benchmark system units. Delegation is provided by the
+      # operator's user@.service because systemd does not delegate slice units.
       [Slice]
-      Delegate=yes
       CPUAccounting=yes
       MemoryAccounting=yes
       TasksAccounting=yes
@@ -93,7 +92,10 @@
       # user receives a delegated cgroup subtree on cgroup v2.
       [Service]
       Delegate={{ iris_bench_delegate_controllers }}
+      AllowedCPUs={{ iris_bench_topology.online_cpus | join(',') }}
+      AllowedMemoryNodes={{ iris_bench_topology.numa_node_cpus.keys() | join(',') }}
   notify: Reload systemd daemon
+  register: iris_bench_user_delegate_dropin
 
 - name: Cgroup | install default limit drop-in
   ansible.builtin.template:
@@ -111,9 +113,32 @@
     daemon_reload: true
   register: iris_bench_slice_result
 
+- name: Cgroup | require an explicit benchmark operator user
+  ansible.builtin.assert:
+    that:
+      - iris_bench_operator_user | length > 0
+      - iris_bench_operator_user != 'root'
+    fail_msg: "iris_bench_operator_user must name the non-root SSH operator."
+    quiet: true
+
+- name: Cgroup | enable required controllers in operator delegation
+  ansible.builtin.command:
+    argv:
+      - /bin/sh
+      - -c
+      - >-
+        test -d "$1" &&
+        printf '+cpu +cpuset\n' > "$1/cgroup.subtree_control"
+      - iris-bench-enable-controllers
+      - "{{ iris_bench_delegated_cgroup_path }}"
+  register: iris_bench_operator_delegate
+  changed_when: false
+  when: not ansible_check_mode
+
 - name: Cgroup | report slice delegation
   ansible.builtin.debug:
     msg:
-      - "slice={{ iris_bench_slice }}"
+      - "accounting_slice={{ iris_bench_slice }}"
+      - "operator={{ iris_bench_operator_user }} delegated_parent={{ iris_bench_delegated_cgroup_path }}"
       - "delegate_controllers={{ iris_bench_delegate_controllers }}"
       - "limits={{ iris_bench_default_limits }}"

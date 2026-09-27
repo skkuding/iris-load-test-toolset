@@ -57,7 +57,7 @@ var transitions = map[State]map[State]bool{
 	StateCollected:   {StateCleaned: true},
 	StateFailed:      {StateCleaned: true},
 	StateInterrupted: {StateCleaned: true},
-	StateCleaned:     {},
+	StateCleaned:     {StateCollected: true},
 }
 
 // CanTransition reports whether from->to is an allowed state transition.
@@ -219,11 +219,11 @@ func AllowedStates(a protocol.Action) []State {
 	case protocol.ActionPrepare:
 		return []State{StateQualified}
 	case protocol.ActionRunBlock:
-		return []State{StatePrepared}
+		return []State{StatePrepared, StateValidating}
 	case protocol.ActionValidate:
 		return []State{StateRunning, StateValidating}
 	case protocol.ActionBundle:
-		return []State{StateValidating, StateComplete}
+		return []State{StateCleaned}
 	case protocol.ActionCleanup:
 		return []State{StateComplete, StateCollected, StateFailed, StateInterrupted}
 	case protocol.ActionStatus:
@@ -284,9 +284,6 @@ func (o *Orchestrator) RunOperation(ctx context.Context, runID string, req proto
 			return existing, ErrOperationInProgress
 		}
 	}
-	if st.State == StateCleaned {
-		return Operation{}, fmt.Errorf("%w: run is cleaned", ErrInvalidTransition)
-	}
 	if !allowedIn(req.Action, st.State) {
 		return Operation{}, fmt.Errorf("%w: %s from %s", ErrInvalidTransition, req.Action, st.State)
 	}
@@ -302,7 +299,7 @@ func (o *Orchestrator) RunOperation(ctx context.Context, runID string, req proto
 	}
 	st.Operations[req.OperationID] = op
 	st.UpdatedAt = o.now()
-	if req.Action == protocol.ActionRunBlock {
+	if req.Action == protocol.ActionRunBlock && st.State == StatePrepared {
 		if err := o.transition(&st, StateRunning); err != nil {
 			return Operation{}, err
 		}

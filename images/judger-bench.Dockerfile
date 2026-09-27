@@ -9,10 +9,11 @@
 #
 # alpha.4 requires root (it creates cgroups), derives
 # /sys/fs/cgroup/sandbox-<CONTAINER_ID> from the CONTAINER_ID environment
-# variable, and never accepts an explicit cgroup parent. The benchmark must
-# therefore run this image inside a delegated cgroup subtree and pass the
-# delegated parent to judger-bench. Samples whose reported cgroup falls outside
-# that parent are rejected as containment failures, never silently accepted.
+# variable, and never accepts an explicit cgroup parent. Stock production-compat
+# runs therefore use this image with --privileged, --cgroupns=host, and the host
+# unified cgroup mount. The outer agent still places each docker process in its
+# delegated worker subtree and records alpha.4's root-level sandbox as explicitly
+# uncontained and non-comparable.
 
 ARG JUDGER_VERSION=v1.0.0-alpha.4
 ARG JUDGER_AMD64_SHA256=2c9a4da817e06f49daabe6b437f81d10f78b42be517d2e345ab4f868a4189103
@@ -22,6 +23,7 @@ WORKDIR /src
 COPY go.mod ./
 COPY cmd/judger-bench ./cmd/judger-bench
 COPY internal/artifact ./internal/artifact
+COPY internal/containment ./internal/containment
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/judger-bench ./cmd/judger-bench
 
 FROM ubuntu:24.04

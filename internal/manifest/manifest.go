@@ -27,21 +27,23 @@ type Outcome struct {
 
 // Manifest is the run-level metadata for a result bundle.
 type Manifest struct {
-	SchemaVersion int                      `json:"schemaVersion"`
-	RunID         string                   `json:"runId"`
-	PlanSHA256    string                   `json:"planSha256"`
-	ToolVersion   string                   `json:"toolVersion"`
-	AgentVersion  string                   `json:"agentVersion,omitempty"`
-	GitCommit     string                   `json:"gitCommit,omitempty"`
-	GitDirty      bool                     `json:"gitDirty"`
-	CreatedAt     time.Time                `json:"createdAt"`
-	Images        map[string]runplan.Image `json:"images"`
-	JudgerDigest  string                   `json:"judgerDigest,omitempty"`
-	Fixtures      []runplan.Fixture        `json:"fixtures,omitempty"`
-	HostFacts     map[string]string        `json:"hostFacts,omitempty"`
-	Outcomes      []Outcome                `json:"outcomes,omitempty"`
-	Overrides     []string                 `json:"overrides,omitempty"`
-	Comparable    bool                     `json:"comparable"`
+	SchemaVersion        int                      `json:"schemaVersion"`
+	RunID                string                   `json:"runId"`
+	PlanSHA256           string                   `json:"planSha256"`
+	ToolVersion          string                   `json:"toolVersion"`
+	AgentVersion         string                   `json:"agentVersion,omitempty"`
+	GitCommit            string                   `json:"gitCommit,omitempty"`
+	GitDirty             bool                     `json:"gitDirty"`
+	CreatedAt            time.Time                `json:"createdAt"`
+	Images               map[string]runplan.Image `json:"images"`
+	JudgerDigest         string                   `json:"judgerDigest,omitempty"`
+	WorkloadBinarySHA256 string                   `json:"workloadBinarySha256"`
+	Fixtures             []runplan.Fixture        `json:"fixtures,omitempty"`
+	HostFacts            map[string]string        `json:"hostFacts,omitempty"`
+	Outcomes             []Outcome                `json:"outcomes,omitempty"`
+	Overrides            []string                 `json:"overrides,omitempty"`
+	Comparable           bool                     `json:"comparable"`
+	ContainmentMode      string                   `json:"containmentMode"`
 }
 
 // Build derives a manifest from a plan and run identity.
@@ -50,18 +52,26 @@ func Build(plan runplan.Plan, planSHA256, agentVersion, gitCommit string, dirty 
 		return Manifest{}, errors.New("manifest: invalid plan digest")
 	}
 	m := Manifest{
-		SchemaVersion: SchemaVersion,
-		RunID:         plan.RunID,
-		PlanSHA256:    planSHA256,
-		ToolVersion:   plan.ToolVersion,
-		AgentVersion:  agentVersion,
-		GitCommit:     gitCommit,
-		GitDirty:      dirty,
-		CreatedAt:     now.UTC(),
-		Images:        plan.Images,
-		JudgerDigest:  plan.JudgerDigest,
-		Fixtures:      append([]runplan.Fixture(nil), plan.Fixtures...),
-		Comparable:    true,
+		SchemaVersion:        SchemaVersion,
+		RunID:                plan.RunID,
+		PlanSHA256:           planSHA256,
+		ToolVersion:          plan.ToolVersion,
+		AgentVersion:         agentVersion,
+		GitCommit:            gitCommit,
+		GitDirty:             dirty,
+		CreatedAt:            now.UTC(),
+		Images:               plan.Images,
+		JudgerDigest:         plan.JudgerDigest,
+		WorkloadBinarySHA256: plan.WorkloadBinary.SHA256,
+		Fixtures:             append([]runplan.Fixture(nil), plan.Fixtures...),
+		Comparable:           true,
+		ContainmentMode:      plan.ContainmentMode,
+	}
+	if plan.ContainmentMode == runplan.ContainmentProductionCompat {
+		m.MarkOverride("stock Judger alpha.4 root-level sandbox cgroups; uncontained production-compat population")
+	}
+	if plan.Qualification.Report == nil {
+		m.MarkOverride("no sealed Ansible qualification report; run is accepted only as non-comparable")
 	}
 	if err := m.Validate(); err != nil {
 		return Manifest{}, err
@@ -94,6 +104,9 @@ func (m Manifest) Validate() error {
 	if m.JudgerDigest != "" && !strings.HasPrefix(m.JudgerDigest, "sha256:") {
 		return fmt.Errorf("manifest: judger digest must be a sha256 reference")
 	}
+	if !artifact.ValidSHA256(m.WorkloadBinarySHA256) {
+		return errors.New("manifest: invalid workload binary digest")
+	}
 	for _, o := range m.Outcomes {
 		if o.Name == "" {
 			return errors.New("manifest: outcome name is required")
@@ -106,6 +119,12 @@ func (m Manifest) Validate() error {
 	}
 	if len(m.Overrides) > 0 && m.Comparable {
 		return errors.New("manifest: overridden runs must be marked non-comparable")
+	}
+	if m.ContainmentMode != runplan.ContainmentIsolated && m.ContainmentMode != runplan.ContainmentProductionCompat {
+		return fmt.Errorf("manifest: invalid containment mode %q", m.ContainmentMode)
+	}
+	if m.ContainmentMode == runplan.ContainmentProductionCompat && m.Comparable {
+		return errors.New("manifest: production-compat runs must be non-comparable")
 	}
 	return nil
 }
@@ -131,7 +150,7 @@ func (m *Manifest) MarkOverride(reason string) {
 // SecretsAbsent fails if any known secret value appears in manifest fields.
 func (m Manifest) SecretsAbsent(secrets []string) error {
 	probe := strings.Join([]string{
-		m.RunID, m.PlanSHA256, m.ToolVersion, m.AgentVersion, m.GitCommit, m.JudgerDigest,
+		m.RunID, m.PlanSHA256, m.ToolVersion, m.AgentVersion, m.GitCommit, m.JudgerDigest, m.WorkloadBinarySHA256,
 	}, "\n")
 	for _, hv := range m.HostFacts {
 		probe += "\n" + hv

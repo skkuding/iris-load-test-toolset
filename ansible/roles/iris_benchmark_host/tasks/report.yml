@@ -52,7 +52,9 @@
         warnings: "{{ iris_bench_verify_warnings | default([]) }}"
       effective_manager_limits: "{{ iris_bench_manager_limits_effective | default({}) }}"
       delegated_slice:
-        unit: "{{ iris_bench_slice }}"
+        unit: "user@{{ iris_bench_operator_uid }}.service"
+        path: "{{ iris_bench_delegated_cgroup_path }}"
+        owner: "{{ iris_bench_slice_owner | default('unknown') }}"
         delegate: "{{ iris_bench_slice_delegate.stdout | default('') | trim }}"
         subtree_control: "{{ iris_bench_slice_subtree_control | default('unknown') }}"
         procs: "{{ iris_bench_slice_procs | default('unknown') }}"

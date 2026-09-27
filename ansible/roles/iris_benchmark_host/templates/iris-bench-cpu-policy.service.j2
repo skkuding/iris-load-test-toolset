@@ -8,9 +8,8 @@ Wants=systemd-tmpfiles-setup.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-# Run inside the delegated slice so the slice (and its Delegate= setting) is
-# loaded at boot even before any benchmark container starts. RemainAfterExit
-# keeps this unit active, which keeps the slice resident.
+# Run inside the benchmark accounting slice. Unprivileged cgroup delegation is
+# provided separately by the operator's user@.service.
 Slice={{ iris_bench_slice }}
 # The script is idempotent and emits JSON describing the effective state. The
 # JSON is captured to tmpfs for qualification/reporting.

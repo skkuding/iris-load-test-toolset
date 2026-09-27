@@ -15,10 +15,11 @@ import (
 // cgroup delegation. Writing a control file also seeds its ".effective" file
 // unless an override is configured or a test placed one, mimicking the kernel.
 type fakeFS struct {
-	files     map[string]string
-	dirs      map[string]bool
-	effective map[string]string
-	denyWrite map[string]bool
+	files       map[string]string
+	dirs        map[string]bool
+	effective   map[string]string
+	denyWrite   map[string]bool
+	removeOrder []string
 }
 
 func newFakeFS() *fakeFS {
@@ -27,6 +28,243 @@ func newFakeFS() *fakeFS {
 		dirs:      map[string]bool{"/": true},
 		effective: map[string]string{},
 		denyWrite: map[string]bool{},
+	}
+}
+
+func TestInspectCgroupIsReadOnlyAndExact(t *testing.T) {
+	f := newFakeFS()
+	f.mkdir("/sys/fs/cgroup/sandbox-run-worker")
+	f.put("/sys/fs/cgroup/sandbox-run-worker/cgroup.procs", "42\n7\n")
+	m := &Manager{Mount: "/sys/fs/cgroup", FS: f}
+
+	got, err := m.InspectCgroup("/sandbox-run-worker")
+	if err != nil || !got.Exists || fmt.Sprint(got.Members) != "[7 42]" {
+		t.Fatalf("inspection = %+v, %v", got, err)
+	}
+	if !f.dirs["/sys/fs/cgroup/sandbox-run-worker"] {
+		t.Fatal("inspection removed the cgroup")
+	}
+	if _, err := m.InspectCgroup("/sandbox-run-worker/../other"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("unsafe path err = %v, want ErrInvalid", err)
+	}
+	absent, err := m.InspectCgroup("/sandbox-absent")
+	if err != nil || absent.Exists {
+		t.Fatalf("absent inspection = %+v, %v", absent, err)
+	}
+}
+
+func TestNormalizeMountRelative(t *testing.T) {
+	cases := []struct {
+		name string
+		path string
+		want string
+		ok   bool
+	}{
+		{"mount-relative", "/sandbox-x/box-1", "/sandbox-x/box-1", true},
+		{"filesystem", "/sys/fs/cgroup/sandbox-x/box-1", "/sandbox-x/box-1", true},
+		{"filesystem-root-child", "/sys/fs/cgroup/sandbox-x", "/sandbox-x", true},
+		{"mount-root", "/sys/fs/cgroup", "", false},
+		{"slash", "/", "", false},
+		{"empty", "", "", false},
+		{"relative", "sandbox-x", "", false},
+		{"prefix-sibling", "/sys/fs/cgroupfoo/sandbox-x", "/sys/fs/cgroupfoo/sandbox-x", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := NormalizeMountRelative(DefaultMount, tc.path)
+			if ok != tc.ok || got != tc.want {
+				t.Fatalf("NormalizeMountRelative(%q) = %q, %v; want %q, %v", tc.path, got, ok, tc.want, tc.ok)
+			}
+		})
+	}
+}
+
+func TestWithinMountRelative(t *testing.T) {
+	cases := []struct {
+		name     string
+		root     string
+		reported string
+		ok       bool
+	}{
+		{"mount-relative-root", "/sandbox-x", "/sandbox-x", true},
+		{"mount-relative-descendant", "/sandbox-x", "/sandbox-x/box-1", true},
+		{"filesystem-root", "/sandbox-x", "/sys/fs/cgroup/sandbox-x", true},
+		{"filesystem-descendant", "/sandbox-x", "/sys/fs/cgroup/sandbox-x/box-1", true},
+		{"filesystem-root-input", "/sys/fs/cgroup/sandbox-x", "/sandbox-x/box-1", true},
+		{"prefix-confusion", "/sandbox-x", "/sandbox-x-evil/box-1", false},
+		{"prefix-confusion-filesystem", "/sandbox-x", "/sys/fs/cgroup/sandbox-x-evil/box-1", false},
+		{"other-root", "/sandbox-x", "/sandbox-y", false},
+		{"relative", "/sandbox-x", "sandbox-x/box-1", false},
+		{"empty", "/sandbox-x", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := WithinMountRelative(DefaultMount, tc.root, tc.reported); got != tc.ok {
+				t.Fatalf("WithinMountRelative(%q, %q) = %v, want %v", tc.root, tc.reported, got, tc.ok)
+			}
+		})
+	}
+}
+
+func TestValidateSandboxRemovalPathsReturnsChildrenThenRoot(t *testing.T) {
+	f := newFakeFS()
+	f.mkdir("/sys/fs/cgroup/sandbox-run-worker")
+	f.put("/sys/fs/cgroup/sandbox-run-worker/cgroup.procs", "")
+	for _, b := range []string{"box-5", "box-1", "box-3", "box-2", "box-4"} {
+		f.mkdir("/sys/fs/cgroup/sandbox-run-worker/" + b)
+		f.put("/sys/fs/cgroup/sandbox-run-worker/"+b+"/cgroup.procs", "")
+	}
+	paths, err := manager(f).ValidateSandboxRemovalPaths("/sandbox-run-worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"/sys/fs/cgroup/sandbox-run-worker/box-1",
+		"/sys/fs/cgroup/sandbox-run-worker/box-2",
+		"/sys/fs/cgroup/sandbox-run-worker/box-3",
+		"/sys/fs/cgroup/sandbox-run-worker/box-4",
+		"/sys/fs/cgroup/sandbox-run-worker/box-5",
+		"/sys/fs/cgroup/sandbox-run-worker",
+	}
+	if fmt.Sprint(paths) != fmt.Sprint(want) {
+		t.Fatalf("paths = %v, want %v", paths, want)
+	}
+	if !f.dirs["/sys/fs/cgroup/sandbox-run-worker"] {
+		t.Fatal("validator mutated the root")
+	}
+	absent, err := manager(f).ValidateSandboxRemovalPaths("/sandbox-absent")
+	if err != nil || absent != nil {
+		t.Fatalf("absent validate = %v, %v; want nil, nil", absent, err)
+	}
+}
+
+func TestValidateSandboxRemovalPathsRefusesEvidence(t *testing.T) {
+	cases := []struct {
+		name    string
+		procs   string
+		box     string
+		boxProc string
+		extra   string
+		wantErr error
+		want    string
+	}{
+		{"root-member", "42\n", "", "", "", ErrNotEmpty, "42"},
+		{"box-member", "", "box-1", "7\n", "", ErrNotEmpty, "7"},
+		{"grandchild", "", "box-1", "", "box-1/grand-1", ErrNotEmpty, "grand-1"},
+		{"unexpected-child", "", "other", "", "", ErrInvalid, "other"},
+		{"unsafe-box", "", "box-..", "", "", ErrInvalid, "box-.."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeFS()
+			f.mkdir("/sys/fs/cgroup/sandbox-run-worker")
+			f.put("/sys/fs/cgroup/sandbox-run-worker/cgroup.procs", tc.procs)
+			if tc.box != "" {
+				f.mkdir("/sys/fs/cgroup/sandbox-run-worker/" + tc.box)
+				f.put("/sys/fs/cgroup/sandbox-run-worker/"+tc.box+"/cgroup.procs", tc.boxProc)
+			}
+			if tc.extra != "" {
+				f.mkdir("/sys/fs/cgroup/sandbox-run-worker/" + tc.extra)
+			}
+			paths, err := manager(f).ValidateSandboxRemovalPaths("/sandbox-run-worker")
+			if !errors.Is(err, tc.wantErr) || paths != nil {
+				t.Fatalf("validate = %v, %v; want %v", paths, err, tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err %q does not preserve %q evidence", err, tc.want)
+			}
+			if !f.dirs["/sys/fs/cgroup/sandbox-run-worker"] {
+				t.Fatal("validator mutated the root")
+			}
+		})
+	}
+}
+
+func TestValidateSandboxRemovalPathsRejectsUnsafePaths(t *testing.T) {
+	f := newFakeFS()
+	f.mkdir("/sys/fs/cgroup/sandbox-run-worker/box-123")
+	m := manager(f)
+	for _, p := range []string{
+		"/sandbox-run-worker/box-123",
+		"/sys/fs/cgroup/sandbox-run-worker",
+		"/sandbox-",
+		"/sandbox-..",
+		"/sandbox-a/b",
+		"/other-x",
+		"sandbox-run-worker",
+		"",
+		"/",
+	} {
+		if _, err := m.ValidateSandboxRemovalPaths(p); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("ValidateSandboxRemovalPaths(%q) = %v, want ErrInvalid", p, err)
+		}
+	}
+}
+
+func TestRemoveEmptySandboxRootRemovesBoxesInOrder(t *testing.T) {
+	f := newFakeFS()
+	f.mkdir("/sys/fs/cgroup/sandbox-run-worker")
+	f.put("/sys/fs/cgroup/sandbox-run-worker/cgroup.procs", "")
+	for _, b := range []string{"box-2", "box-1", "box-3"} {
+		f.mkdir("/sys/fs/cgroup/sandbox-run-worker/" + b)
+		f.put("/sys/fs/cgroup/sandbox-run-worker/"+b+"/cgroup.procs", "")
+	}
+	f.removeOrder = nil
+	m := manager(f)
+	if err := m.RemoveEmptySandboxRoot("/sandbox-run-worker"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"/sys/fs/cgroup/sandbox-run-worker/box-1",
+		"/sys/fs/cgroup/sandbox-run-worker/box-2",
+		"/sys/fs/cgroup/sandbox-run-worker/box-3",
+		"/sys/fs/cgroup/sandbox-run-worker",
+	}
+	if fmt.Sprint(f.removeOrder) != fmt.Sprint(want) {
+		t.Fatalf("remove order = %v, want %v", f.removeOrder, want)
+	}
+	for _, p := range want {
+		if f.dirs[p] {
+			t.Fatalf("%s still exists after removal", p)
+		}
+	}
+	if err := m.RemoveEmptySandboxRoot("/sandbox-absent"); err != nil {
+		t.Fatalf("absent root should be a no-op: %v", err)
+	}
+}
+
+func TestRemoveEmptySandboxRootPreservesOnUnexpectedChild(t *testing.T) {
+	f := newFakeFS()
+	f.mkdir("/sys/fs/cgroup/sandbox-run-worker")
+	f.put("/sys/fs/cgroup/sandbox-run-worker/cgroup.procs", "")
+	f.mkdir("/sys/fs/cgroup/sandbox-run-worker/other")
+	err := manager(f).RemoveEmptySandboxRoot("/sandbox-run-worker")
+	if !errors.Is(err, ErrInvalid) {
+		t.Fatalf("err = %v, want ErrInvalid", err)
+	}
+	if !f.dirs["/sys/fs/cgroup/sandbox-run-worker"] || !f.dirs["/sys/fs/cgroup/sandbox-run-worker/other"] {
+		t.Fatal("unexpected child caused a partial removal")
+	}
+}
+
+func TestRemoveEmptySandboxRootRejectsUnsafePaths(t *testing.T) {
+	f := newFakeFS()
+	f.mkdir("/sys/fs/cgroup/sandbox-run-worker/box-123")
+	m := manager(f)
+	for _, p := range []string{
+		"/sandbox-run-worker/box-123",
+		"/sys/fs/cgroup/sandbox-run-worker",
+		"/sandbox-",
+		"/sandbox-..",
+		"/sandbox-a/b",
+		"/other-x",
+		"sandbox-run-worker",
+		"",
+		"/",
+	} {
+		if err := m.RemoveEmptySandboxRoot(p); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("RemoveEmptySandboxRoot(%q) = %v, want ErrInvalid", p, err)
+		}
 	}
 }
 
@@ -86,6 +324,7 @@ func (f *fakeFS) Remove(p string) error {
 	clean := path.Clean(p)
 	if _, ok := f.files[clean]; ok {
 		delete(f.files, clean)
+		f.removeOrder = append(f.removeOrder, clean)
 		return nil
 	}
 	if f.dirs[clean] {
@@ -105,6 +344,7 @@ func (f *fakeFS) Remove(p string) error {
 				delete(f.dirs, k)
 			}
 		}
+		f.removeOrder = append(f.removeOrder, clean)
 		return nil
 	}
 	return fmt.Errorf("remove %s: %w", p, fs.ErrNotExist)

@@ -8,11 +8,11 @@
 #
 # Usage:
 #   scripts/qualify-host.sh codedang8
-#   ansible-playbook playbooks/qualify_host.yml -l codedang8 --ask-become-pass
+#   ansible-playbook playbooks/qualify_host.yml -l codedang8
 - name: Qualify the Iris benchmark host (read-only)
   hosts: benchmark_hosts
   gather_facts: true
-  become: true
+  become: false
   any_errors_fatal: true
 
   tasks:
@@ -55,6 +55,6 @@
         msg:
           - "compatible={{ iris_bench_compatible | default(false) }}"
           - "governor_effective={{ iris_bench_effective.governor | default('unknown') }}"
-          - "turbo_policy={{ iris_bench_turbo_policy }} turbo_effective={{ iris_bench_effective.turbo | default('unknown') }}"
+          - "turbo_policy={{ iris_bench_compatibility.cpu_policy.turbo_policy | default('unknown') }} turbo_effective={{ iris_bench_effective.turbo | default('unknown') }}"
           - "smt_effective={{ iris_bench_effective.smt | default('unknown') }}"
           - "report={{ iris_bench_report_path | default('not-written') }}"

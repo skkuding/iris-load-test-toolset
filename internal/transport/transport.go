@@ -29,13 +29,19 @@ const (
 
 // remoteTokenPattern guarantees a token cannot be reinterpreted by the remote
 // shell that OpenSSH invokes.
-var remoteTokenPattern = regexp.MustCompile(`^[A-Za-z0-9_./=:@+-]+$`)
+var (
+	remoteTokenPattern = regexp.MustCompile(`^[A-Za-z0-9_./=:@+%,-]+$`)
+	sha256Pattern      = regexp.MustCompile(`^[0-9a-f]{64}$`)
+)
+
+const remoteStagePrefix = "/tmp/iris-bench-"
 
 // Options configures an SSH wrapper.
 type Options struct {
 	SSHBinary      string
 	SCPBinary      string
 	SocketDir      string
+	ControlPath    string
 	BatchMode      bool
 	ConnectTimeout int
 	ControlPersist string
@@ -74,6 +80,9 @@ func (o Options) Validate() error {
 	if strings.ContainsAny(o.ControlPersist, "\x00\n\r ") {
 		return errors.New("transport: invalid control persist value")
 	}
+	if strings.ContainsAny(o.ControlPath, "\x00\n\r") {
+		return errors.New("transport: invalid control path")
+	}
 	return nil
 }
 
@@ -107,6 +116,21 @@ func (s SSH) SocketPath() (string, error) {
 	opts := s.Opts.withDefaults()
 	if s.Host == "" {
 		return "", errors.New("transport: empty host")
+	}
+	// An explicit ControlPath (operator-provided socket) takes precedence over
+	// the derived per-host name.
+	if opts.ControlPath != "" {
+		p, err := ExpandSocketDir(opts.ControlPath)
+		if err != nil {
+			return "", err
+		}
+		if len(p) >= 104 {
+			return "", fmt.Errorf("transport: control socket path too long: %q", p)
+		}
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			return "", fmt.Errorf("transport: create socket dir: %w", err)
+		}
+		return p, nil
 	}
 	dir, err := ExpandSocketDir(opts.SocketDir)
 	if err != nil {
@@ -251,10 +275,7 @@ func (s SSH) Download(ctx context.Context, remotePath, localPath string) error {
 // Upload copies a local file to an absolute remote path over scp, reusing the
 // control socket.
 func (s SSH) Upload(ctx context.Context, localPath, remotePath string) error {
-	if !filepath.IsAbs(remotePath) {
-		return fmt.Errorf("transport: remote path must be absolute: %q", remotePath)
-	}
-	if err := ValidateRemoteToken(remotePath); err != nil {
+	if err := validateRunFilePath(remotePath); err != nil {
 		return err
 	}
 	opts := s.Opts.withDefaults()
@@ -268,6 +289,104 @@ func (s SSH) Upload(ctx context.Context, localPath, remotePath string) error {
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+// RunDir returns the only remote staging directory accepted for runID.
+func RunDir(runID string) (string, error) {
+	if !protocol.ValidRunID(runID) {
+		return "", fmt.Errorf("transport: invalid run id %q", runID)
+	}
+	return remoteStagePrefix + runID, nil
+}
+
+func validateRunFilePath(path string) error {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path || filepath.Base(path) == "." {
+		return fmt.Errorf("transport: invalid staged file path %q", path)
+	}
+	dir := filepath.Dir(path)
+	if !strings.HasPrefix(dir, remoteStagePrefix) {
+		return fmt.Errorf("transport: staged file is outside a run directory: %q", path)
+	}
+	runID := strings.TrimPrefix(dir, remoteStagePrefix)
+	want, err := RunDir(runID)
+	if err != nil || dir != want {
+		return fmt.Errorf("transport: invalid staged file path %q", path)
+	}
+	return ValidateRemoteToken(path)
+}
+
+func (s SSH) runRemote(ctx context.Context, remote []string, capture bool) ([]byte, error) {
+	args, err := s.CommandArgs(remote)
+	if err != nil {
+		return nil, err
+	}
+	opts := s.Opts.withDefaults()
+	cmd := exec.CommandContext(ctx, opts.SSHBinary, args...)
+	var out bytes.Buffer
+	if capture {
+		cmd.Stdout = &out
+	} else {
+		cmd.Stdout = os.Stderr
+	}
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return nil, err
+	}
+	return out.Bytes(), nil
+}
+
+// CreateRunDir atomically claims a fresh private staging directory. Existing
+// paths, including symlinks, are rejected by mkdir.
+func (s SSH) CreateRunDir(ctx context.Context, runID string) (string, error) {
+	dir, err := RunDir(runID)
+	if err != nil {
+		return "", err
+	}
+	if _, err := s.runRemote(ctx, []string{"mkdir", "-m", "0700", "--", dir}, false); err != nil {
+		return "", fmt.Errorf("transport: create run directory: %w", err)
+	}
+	out, err := s.runRemote(ctx, []string{"stat", "-c", "%F", "--", dir}, true)
+	if err != nil || strings.TrimSpace(string(out)) != "directory" {
+		_ = s.RemoveRunDir(context.WithoutCancel(ctx), runID)
+		return "", fmt.Errorf("transport: staged path is not a directory")
+	}
+	if _, err := s.runRemote(ctx, []string{"chmod", "0700", "--", dir}, false); err != nil {
+		_ = s.RemoveRunDir(context.WithoutCancel(ctx), runID)
+		return "", fmt.Errorf("transport: set run directory mode: %w", err)
+	}
+	out, err = s.runRemote(ctx, []string{"stat", "-c", "%a", "--", dir}, true)
+	if err != nil || strings.TrimSpace(string(out)) != "700" {
+		_ = s.RemoveRunDir(context.WithoutCancel(ctx), runID)
+		return "", fmt.Errorf("transport: staged directory mode is not 0700")
+	}
+	return dir, nil
+}
+
+// RemoveRunDir removes only the exact validated run staging directory. rm does
+// not traverse a command-line symlink, so a raced replacement is not followed.
+func (s SSH) RemoveRunDir(ctx context.Context, runID string) error {
+	dir, err := RunDir(runID)
+	if err != nil {
+		return err
+	}
+	_, err = s.runRemote(ctx, []string{"rm", "-rf", "--", dir}, false)
+	return err
+}
+
+// SHA256 returns the remote digest of one validated run-scoped staged file.
+func (s SSH) SHA256(ctx context.Context, remotePath string) (string, error) {
+	if err := validateRunFilePath(remotePath); err != nil {
+		return "", err
+	}
+	out, err := s.runRemote(ctx, []string{"sha256sum", "--", remotePath}, true)
+	if err != nil {
+		return "", err
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) != 2 || !sha256Pattern.MatchString(fields[0]) || fields[1] != remotePath {
+		return "", fmt.Errorf("transport: invalid sha256sum output %q", strings.TrimSpace(string(out)))
+	}
+	return fields[0], nil
 }
 
 // AgentClient invokes the staged agent through SSH, sending one JSON request

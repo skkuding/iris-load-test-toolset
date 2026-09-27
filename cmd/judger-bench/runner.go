@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/skkuding/iris-load-test-toolset/internal/artifact"
+	"github.com/skkuding/iris-load-test-toolset/internal/containment"
 )
 
 type modeType string
@@ -90,6 +91,8 @@ type options struct {
 	JudgerSHA256         string
 	ContainerID          string
 	ExpectedCgroupParent string
+	ProductionCompat     bool
+	ExpectedOutput       string
 	UID                  int
 	GID                  int
 	SeccompRule          string
@@ -117,17 +120,26 @@ type sample struct {
 	CPUTimeMs           int     `json:"cpuTimeMs"`
 	RealTimeMs          int     `json:"realTimeMs"`
 	ControllerElapsedMs float64 `json:"controllerElapsedMs"`
-	MemoryBytes         int64   `json:"memoryBytes"`
-	Signal              int     `json:"signal"`
-	ExitCode            int     `json:"exitCode"`
-	ErrorCode           int     `json:"errorCode"`
-	ResultCode          int     `json:"resultCode"`
-	CgroupPath          string  `json:"cgroupPath,omitempty"`
-	CgroupContained     bool    `json:"cgroupContained"`
-	JudgerSHA256        string  `json:"judgerSha256,omitempty"`
-	OutputSHA256        string  `json:"outputSha256,omitempty"`
-	OutputBytes         int64   `json:"outputBytes,omitempty"`
-	Error               string  `json:"error,omitempty"`
+	// StartedAtNs and EndedAtNs are host-wide wall-clock timestamps recorded
+	// immediately before and after each execute-mode Judger invocation. They
+	// let the coordinator and analyzers isolate the all-workers-active steady
+	// window. Compile samples leave them zero.
+	StartedAtNs     int64  `json:"startedAtNs"`
+	EndedAtNs       int64  `json:"endedAtNs"`
+	MemoryBytes     int64  `json:"memoryBytes"`
+	Signal          int    `json:"signal"`
+	ExitCode        int    `json:"exitCode"`
+	ErrorCode       int    `json:"errorCode"`
+	ResultCode      int    `json:"resultCode"`
+	CgroupPath      string `json:"cgroupPath,omitempty"`
+	CgroupContained bool   `json:"cgroupContained"`
+	JudgerSHA256    string `json:"judgerSha256,omitempty"`
+	OutputSHA256    string `json:"outputSha256,omitempty"`
+	OutputBytes     int64  `json:"outputBytes,omitempty"`
+	OutputMatches   bool   `json:"outputMatches"`
+	ContainmentMode string `json:"containmentMode"`
+	Comparable      bool   `json:"comparable"`
+	Error           string `json:"error,omitempty"`
 }
 
 // judgerResult is the authoritative alpha.4 JSON document. Every field the task
@@ -243,6 +255,13 @@ func runExecute(ctx context.Context, opt options) ([]sample, error) {
 	if opt.ContainerID == "" {
 		return nil, errors.New("execute mode requires --container-id (Judger derives sandbox-<id> from it)")
 	}
+	if opt.ExpectedOutput == "" {
+		return nil, errors.New("execute mode requires --expected-output")
+	}
+	expectedOutputSum, _, err := artifact.HashFile(opt.ExpectedOutput)
+	if err != nil {
+		return nil, fmt.Errorf("expected output: %w", err)
+	}
 	parent := opt.ExpectedCgroupParent
 	if parent == "" {
 		return nil, errors.New("execute mode requires --expected-cgroup-parent")
@@ -272,7 +291,7 @@ func runExecute(ctx context.Context, opt options) ([]sample, error) {
 	}
 
 	samples := make([]sample, 0, opt.Iterations)
-	var containmentErr error
+	var runErr error
 	for i := 0; i < opt.Iterations; i++ {
 		if err := ctx.Err(); err != nil {
 			return samples, err
@@ -287,31 +306,90 @@ func runExecute(ctx context.Context, opt options) ([]sample, error) {
 		logPath := filepath.Join(workDir, fmt.Sprintf("iter-%06d.judger.log", i))
 
 		args := buildJudgerArgs(opt, bin, inputPath, outPath, errPath, logPath, uid, gid)
+		startedAtNs := time.Now().UnixNano()
 		jr := invokeJudger(ctx, opt, args)
+		endedAtNs := time.Now().UnixNano()
 
 		s := opt.newExecuteSample(i, jr)
+		s.StartedAtNs = startedAtNs
+		s.EndedAtNs = endedAtNs
 		s.JudgerSHA256 = judgerSum
 		if jr.ok && jr.res.exitCode == 0 && !jr.res.timedOut {
 			if sum, size, herr := artifact.HashFile(outPath); herr == nil {
 				s.OutputSHA256 = sum
 				s.OutputBytes = size
+				s.OutputMatches = sum == expectedOutputSum
+				if !s.OutputMatches && s.Status == "success" {
+					s.Status = "wrong_answer"
+					s.Error = "output sha256 does not match the sealed expected output"
+				}
+			} else {
+				s.Status = "failed"
+				s.Error = "read Judger output: " + herr.Error()
 			}
 		}
 		if jr.ok {
-			if verr := validateCgroupBeneath(parent, jr.parsed.CgroupPath); verr != nil {
+			var verr error
+			if opt.ProductionCompat {
+				verr = validateProductionCgroup(opt.ContainerID, jr.parsed.CgroupPath)
+				s.ContainmentMode = "production-compat"
+				s.Comparable = false
+			} else {
+				verr = validateCgroupBeneath(parent, jr.parsed.CgroupPath)
+				s.ContainmentMode = "isolated"
+				s.Comparable = true
+			}
+			if verr != nil {
 				s.CgroupContained = false
 				s.Status = "cgroup_escape"
 				s.Error = verr.Error()
-				if containmentErr == nil {
-					containmentErr = fmt.Errorf("iteration %d: %w", i, verr)
+				if runErr == nil {
+					runErr = fmt.Errorf("iteration %d: %w", i, verr)
 				}
-			} else {
+			} else if !opt.ProductionCompat {
 				s.CgroupContained = true
 			}
 		}
+		if s.Status != "success" && runErr == nil {
+			runErr = fmt.Errorf("iteration %d: sample status %s", i, s.Status)
+		}
 		samples = append(samples, s)
 	}
-	return samples, containmentErr
+	return samples, runErr
+}
+
+// validateProductionCgroup accepts the stock alpha.4 sandbox that Judger
+// reports from its own cgroup view. A live alpha.4 reports the full filesystem
+// path "/sys/fs/cgroup/sandbox-<id>/box-*" while the monitor compares against
+// the mount-relative run-scoped root "/sandbox-<id>". Both forms are normalized
+// and accepted as the exact run-scoped root or one of its descendants; sibling
+// prefix confusion such as "/sandbox-<id>-evil" is still rejected. Isolated
+// validation is separate and unchanged.
+func validateProductionCgroup(containerID, reported string) error {
+	want := "/sandbox-" + containerID
+	if !safeContainerID(containerID) {
+		return fmt.Errorf("%w: production compatibility container id %q is not a safe path component", errCgroupEscape, containerID)
+	}
+	if !containment.WithinMountRelative(containment.DefaultMount, want, reported) {
+		return fmt.Errorf("%w: production compatibility expected root sandbox %q, got %q", errCgroupEscape, want, reported)
+	}
+	return nil
+}
+
+// safeContainerID reports whether id is a single safe path component matching
+// the IDs produced by the agent's container-id sanitizer.
+func safeContainerID(id string) bool {
+	if id == "" || id == "." || id == ".." {
+		return false
+	}
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func (o options) newCompileSample(res procResult) sample {
@@ -381,6 +459,9 @@ func (o options) newExecuteSample(iter int, jr judgerRun) sample {
 func judgerStatus(jr judgerResult) (string, string) {
 	if jr.ErrorCode != 0 {
 		return "judger_error", fmt.Sprintf("judger error code %d", jr.ErrorCode)
+	}
+	if jr.CPUTime < 0 || jr.RealTime < 0 || jr.Memory < 0 {
+		return "failed", "judger reported negative resource measurements"
 	}
 	switch jr.ResultCode {
 	case 0:

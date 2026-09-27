@@ -30,7 +30,7 @@
   "hosts": [
     {
       "alias": "codedang8",
-      "hostIdentity": "server8",
+      "hostIdentity": "skkuding-4f-4",
       "allow": true
     }
   ],
@@ -41,6 +41,7 @@
   "limits": {
     "maxWorkers": 16,
     "maxRunSeconds": 3600,
+    "maxLoad1": 1.0,
     "maxQueueDepth": 100000,
     "maxDiskMiB": 40960
   }

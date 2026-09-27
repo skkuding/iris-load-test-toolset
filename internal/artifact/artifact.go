@@ -229,7 +229,7 @@ func VerifyInventory(root string, inv Inventory) error {
 	}
 	for _, e := range inv.Entries {
 		full := filepath.Join(root, filepath.FromSlash(e.Path))
-		info, err := os.Stat(full)
+		info, err := os.Lstat(full)
 		if err != nil {
 			return fmt.Errorf("artifact: entry %q: %w", e.Path, err)
 		}
@@ -264,8 +264,11 @@ func VerifyComplete(root string, inv Inventory) error {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() || !d.Type().IsRegular() {
+		if d.IsDir() {
 			return nil
+		}
+		if !d.Type().IsRegular() {
+			return fmt.Errorf("artifact: unexpected non-regular entry %q", p)
 		}
 		rel, err := filepath.Rel(root, p)
 		if err != nil {

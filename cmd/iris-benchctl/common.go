@@ -29,17 +29,25 @@ func (s *stringList) Set(v string) error {
 
 // planOptions are the flags shared by plan and run.
 type planOptions struct {
-	configPath       string
-	host             string
-	profile          string
-	suite            string
-	runID            string
-	irisDigest       string
-	judgerDigest     string
-	judgerDigestFile string
-	resolveImage     bool
-	seed             int64
-	fixtures         stringList
+	configPath          string
+	host                string
+	profile             string
+	suite               string
+	runID               string
+	irisDigest          string
+	judgerDigest        string
+	judgerDigestFile    string
+	benchmarkImage      string
+	resolveImage        bool
+	seed                int64
+	fixtures            stringList
+	expectedOutputs     stringList
+	benchBinary         string
+	benchBinarySHA      string
+	localBenchBinary    string
+	qualificationReport string
+	productionCompat    bool
+	sshControlPath      string
 }
 
 func (o *planOptions) register(fs *flag.FlagSet) {
@@ -51,9 +59,15 @@ func (o *planOptions) register(fs *flag.FlagSet) {
 	fs.StringVar(&o.irisDigest, "iris-digest", "", "resolved Iris manifest digest (sha256:...)")
 	fs.StringVar(&o.judgerDigest, "judger-digest", "", "Judger artifact SHA-256 (raw hex or sha256:...)")
 	fs.StringVar(&o.judgerDigestFile, "judger-digest-file", "", "file whose SHA-256 is the Judger digest")
+	fs.StringVar(&o.benchmarkImage, "benchmark-image", "", "immutable local judger-bench Docker image ID (sha256:<64 lowercase hex>)")
 	fs.BoolVar(&o.resolveImage, "resolve-image", false, "resolve the Iris tag with docker buildx imagetools")
 	fs.Int64Var(&o.seed, "seed", 1, "run random seed")
 	fs.Var(&o.fixtures, "fixture", "fixture name=path (repeatable)")
+	fs.Var(&o.expectedOutputs, "expected-output", "expected output name=path (repeatable; must match --fixture)")
+	fs.StringVar(&o.benchBinary, "bench-binary", "", "REMOTE precompiled direct-suite workload binary")
+	fs.StringVar(&o.benchBinarySHA, "bench-binary-sha256", "", "SHA-256 of the REMOTE --bench-binary")
+	fs.BoolVar(&o.productionCompat, "production-compat", false, "accept stock alpha.4 root-level sandbox cgroups as an uncontained, non-comparable population")
+	fs.StringVar(&o.sshControlPath, "ssh-control-path", "", "explicit OpenSSH ControlPath (default <socketDir>/iris-bench-<host>)")
 }
 
 func loadConfig(path string) (config.Config, error) {
@@ -97,7 +111,7 @@ func (o *planOptions) buildPlan(ctx context.Context, cfg config.Config) (runplan
 		}
 		runID = id
 	}
-	fixtures, err := o.resolveFixtures()
+	fixtures, err := o.resolveFixtures(runID)
 	if err != nil {
 		return runplan.Plan{}, "", err
 	}
@@ -113,23 +127,51 @@ func (o *planOptions) buildPlan(ctx context.Context, cfg config.Config) (runplan
 	if err != nil {
 		return runplan.Plan{}, "", err
 	}
+	workload, err := o.resolveWorkload(runID)
+	if err != nil {
+		return runplan.Plan{}, "", err
+	}
+	qualification := runplan.Qualification{RequireCgroupV2: true, MinPhysicalCores: 1, MaxLoad1: cfg.Limits.MaxLoad1, MaxRunSeconds: cfg.Limits.MaxRunSeconds}
+	if o.qualificationReport != "" {
+		sum, _, err := artifact.HashFile(o.qualificationReport)
+		if err != nil {
+			return runplan.Plan{}, "", fmt.Errorf("qualification report: %w", err)
+		}
+		qualification.Report = &runplan.StagedFile{Path: stagedPath(runID, "qualification.json"), SHA256: sum}
+	}
 	images := map[string]runplan.Image{
 		"iris": {Reference: cfg.Iris.Image, Digest: irisDigest},
+	}
+	if o.benchmarkImage != "" {
+		if !runplan.ValidImageDigest(o.benchmarkImage) {
+			return runplan.Plan{}, "", fmt.Errorf("--benchmark-image must be exactly sha256:<64 lowercase hex>")
+		}
+		images["judger-bench"] = runplan.Image{Reference: o.benchmarkImage, Digest: o.benchmarkImage}
+	}
+	if o.productionCompat && o.benchmarkImage == "" {
+		return runplan.Plan{}, "", errors.New("--production-compat requires --benchmark-image")
 	}
 	if cfg.Iris.RabbitMQImage != "" {
 		images["rabbitmq"] = runplan.Image{Reference: cfg.Iris.RabbitMQImage}
 	}
 	blockID := o.profile + "-01"
 	plan, err := runplan.Build(runplan.BuildInput{
-		ToolVersion:  toolVersion,
-		RunID:        runID,
-		Seed:         o.seed,
-		Target:       runplan.Target{SSHAlias: host.Alias, HostIdentity: host.HostIdentity},
-		Suite:        suite,
-		Profile:      o.profile,
-		Fixtures:     fixtures,
-		Images:       images,
-		JudgerDigest: judger,
+		ToolVersion:    toolVersion,
+		RunID:          runID,
+		Seed:           o.seed,
+		Target:         runplan.Target{SSHAlias: host.Alias, HostIdentity: host.HostIdentity},
+		Suite:          suite,
+		Profile:        o.profile,
+		Fixtures:       fixtures,
+		Images:         images,
+		JudgerDigest:   judger,
+		WorkloadBinary: workload,
+		ContainmentMode: func() string {
+			if o.productionCompat {
+				return runplan.ContainmentProductionCompat
+			}
+			return runplan.ContainmentIsolated
+		}(),
 		Blocks: []runplan.Block{{
 			ID:          blockID,
 			Suite:       suite,
@@ -139,7 +181,7 @@ func (o *planOptions) buildPlan(ctx context.Context, cfg config.Config) (runplan
 			NUMAPolicy:  prof.NUMAPolicy,
 			Repetitions: prof.Repetitions,
 		}},
-		Qualification: runplan.Qualification{RequireCgroupV2: true, MinPhysicalCores: 1, MaxRunSeconds: cfg.Limits.MaxRunSeconds},
+		Qualification: qualification,
 		Cleanup:       runplan.Cleanup{RemoveContainers: true, RemoveRunDir: true, PreserveEvidence: true},
 	})
 	if err != nil {
@@ -155,20 +197,84 @@ func (o *planOptions) buildPlan(ctx context.Context, cfg config.Config) (runplan
 	return plan, sha, nil
 }
 
-func (o *planOptions) resolveFixtures() ([]runplan.Fixture, error) {
+func (o *planOptions) resolveFixtures(runID string) ([]runplan.Fixture, error) {
+	expected := make(map[string]string, len(o.expectedOutputs))
+	for _, spec := range o.expectedOutputs {
+		name, path, ok := strings.Cut(spec, "=")
+		if !ok || name == "" || path == "" {
+			return nil, fmt.Errorf("invalid --expected-output %q (want name=path)", spec)
+		}
+		if _, duplicate := expected[name]; duplicate {
+			return nil, fmt.Errorf("duplicate --expected-output name %q", name)
+		}
+		expected[name] = path
+	}
 	var out []runplan.Fixture
+	seen := make(map[string]bool, len(o.fixtures))
 	for _, spec := range o.fixtures {
 		name, path, ok := strings.Cut(spec, "=")
 		if !ok || name == "" || path == "" {
 			return nil, fmt.Errorf("invalid --fixture %q (want name=path)", spec)
 		}
+		if seen[name] {
+			return nil, fmt.Errorf("duplicate --fixture name %q", name)
+		}
+		seen[name] = true
+		expectedPath, ok := expected[name]
+		if !ok {
+			return nil, fmt.Errorf("fixture %q has no matching --expected-output", name)
+		}
+		path, err := filepath.Abs(path)
+		if err != nil {
+			return nil, fmt.Errorf("fixture %q path: %w", name, err)
+		}
+		expectedPath, err = filepath.Abs(expectedPath)
+		if err != nil {
+			return nil, fmt.Errorf("expected output %q path: %w", name, err)
+		}
 		sum, _, err := artifact.HashFile(path)
 		if err != nil {
 			return nil, fmt.Errorf("fixture %q: %w", name, err)
 		}
-		out = append(out, runplan.Fixture{Name: name, Path: path, SHA256: sum})
+		expectedSum, _, err := artifact.HashFile(expectedPath)
+		if err != nil {
+			return nil, fmt.Errorf("expected output %q: %w", name, err)
+		}
+		i := len(out)
+		out = append(out, runplan.Fixture{Name: name, Path: stagedPath(runID, fmt.Sprintf("fixture-%02d.input", i)), SHA256: sum, ExpectedOutputPath: stagedPath(runID, fmt.Sprintf("fixture-%02d.expected", i)), ExpectedOutputSHA256: expectedSum})
+	}
+	if len(expected) != len(seen) {
+		return nil, errors.New("every --expected-output must have a matching --fixture")
 	}
 	return out, nil
+}
+
+func (o *planOptions) resolveWorkload(runID string) (runplan.StagedFile, error) {
+	if o.localBenchBinary != "" {
+		if o.benchBinary != "" || o.benchBinarySHA != "" {
+			return runplan.StagedFile{}, errors.New("--local-bench-binary cannot be combined with remote --bench-binary flags")
+		}
+		sum, _, err := artifact.HashFile(o.localBenchBinary)
+		if err != nil {
+			return runplan.StagedFile{}, fmt.Errorf("local workload binary: %w", err)
+		}
+		return runplan.StagedFile{Path: stagedPath(runID, "workload"), SHA256: sum}, nil
+	}
+	if o.benchBinary == "" || o.benchBinarySHA == "" {
+		return runplan.StagedFile{}, errors.New("direct suite requires --local-bench-binary or both remote --bench-binary and --bench-binary-sha256")
+	}
+	if !filepath.IsAbs(o.benchBinary) {
+		return runplan.StagedFile{}, errors.New("--bench-binary REMOTE path must be absolute")
+	}
+	sum := strings.TrimPrefix(o.benchBinarySHA, "sha256:")
+	if !artifact.ValidSHA256(sum) {
+		return runplan.StagedFile{}, errors.New("--bench-binary-sha256 is invalid")
+	}
+	return runplan.StagedFile{Path: o.benchBinary, SHA256: sum}, nil
+}
+
+func stagedPath(runID, suffix string) string {
+	return filepath.Join("/tmp", "iris-bench-"+runID, suffix)
 }
 
 func (o *planOptions) resolveJudger() (string, error) {
@@ -208,11 +314,15 @@ func agentPath(cfg config.Config, override string) string {
 	return filepath.Join(cfg.Paths.BinRoot, toolVersion, "iris-bench-agent")
 }
 
-func makeSSH(cfg config.Config, host string) transport.SSH {
+func makeSSH(cfg config.Config, host, controlPath string) transport.SSH {
+	if controlPath == "" {
+		controlPath = cfg.Paths.SSHControlPath
+	}
 	return transport.SSH{
 		Host: host,
 		Opts: transport.Options{
 			SocketDir:      cfg.Paths.SocketDir,
+			ControlPath:    controlPath,
 			BatchMode:      true,
 			ConnectTimeout: transport.DefaultConnectTimeout,
 		},

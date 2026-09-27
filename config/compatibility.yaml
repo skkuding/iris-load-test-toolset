@@ -8,7 +8,7 @@
 #
 # Hardware, firmware, kernel, and topology values are comparison keys, not just
 # pass/fail gates: a host that meets the envelope but differs on a comparison key
-# belongs to a different benchmark population. See PROPOSE.md "Compatibility
+# belongs to a different benchmark population. See the benchmark plan "Compatibility
 # envelope" and "Qualification capture".
 #
 # No secret or credential value belongs in this file.
@@ -160,7 +160,7 @@ iris_bench_compatibility:
     - dependency_generation
 
   # Thresholds for the direct one-worker baseline. They are intentionally loose
-  # until the first controlled dataset exists (see PROPOSE.md success criteria).
+  # until the first controlled dataset exists (see the benchmark success criteria).
   qualification:
     cpu_time_cv_max_percent: 3.0
     median_change_max_percent: 5.0

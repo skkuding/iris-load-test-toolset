@@ -15,10 +15,11 @@ import (
 func cmdStatus(args []string) error {
 	fs := newFlagSet("status")
 	var (
-		configPath    = fs.String("config", "", "configuration JSON file")
-		runID         = fs.String("run", "", "run id")
-		host          = fs.String("host", "", "target SSH alias (remote status)")
-		agentOverride = fs.String("agent", "", "remote agent path override")
+		configPath     = fs.String("config", "", "configuration JSON file")
+		runID          = fs.String("run", "", "run id")
+		host           = fs.String("host", "", "target SSH alias (remote status)")
+		agentOverride  = fs.String("agent", "", "remote agent path override")
+		sshControlPath = fs.String("ssh-control-path", "", "explicit OpenSSH ControlPath")
 	)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -51,7 +52,7 @@ func cmdStatus(args []string) error {
 		return err
 	}
 	agent := transport.AgentClient{
-		SSH:         makeSSH(cfg, *host),
+		SSH:         makeSSH(cfg, *host, *sshControlPath),
 		RemoteAgent: agentPath(cfg, *agentOverride),
 		Stderr:      os.Stderr,
 	}

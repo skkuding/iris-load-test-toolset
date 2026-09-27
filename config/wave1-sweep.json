@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "toolVersion": "0.1.0",
+  "iris": {
+    "image": "ghcr.io/skkuding/codedang-iris:stage"
+  },
+  "profiles": {
+    "ladder-1": {
+      "suite": "judger",
+      "workers": 1,
+      "repetitions": 150,
+      "cpuList": "0-31",
+      "numaPolicy": "bind"
+    },
+    "ladder-2": {
+      "suite": "judger",
+      "workers": 2,
+      "repetitions": 50,
+      "cpuList": "0-31",
+      "numaPolicy": "bind"
+    },
+    "ladder-4": {
+      "suite": "judger",
+      "workers": 4,
+      "repetitions": 50,
+      "cpuList": "0-31",
+      "numaPolicy": "bind"
+    },
+    "ladder-8": {
+      "suite": "judger",
+      "workers": 8,
+      "repetitions": 50,
+      "cpuList": "0-31",
+      "numaPolicy": "bind"
+    },
+    "ladder-16": {
+      "suite": "judger",
+      "workers": 16,
+      "repetitions": 50,
+      "cpuList": "0-31",
+      "numaPolicy": "bind"
+    },
+    "ladder-30": {
+      "suite": "judger",
+      "workers": 30,
+      "repetitions": 50,
+      "cpuList": "0-31",
+      "numaPolicy": "bind"
+    }
+  },
+  "hosts": [
+    {
+      "alias": "codedang8",
+      "hostIdentity": "skkuding-4f-4",
+      "allow": true
+    }
+  ],
+  "paths": {
+    "socketDir": "~/.ssh/sockets",
+    "resultRoot": "runs"
+  },
+  "limits": {
+    "maxWorkers": 32,
+    "maxRunSeconds": 3600,
+    "maxLoad1": 1.0,
+    "maxQueueDepth": 100000,
+    "maxDiskMiB": 40960
+  }
+}

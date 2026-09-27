@@ -66,19 +66,21 @@ func run(args []string) error {
 		compiler   = fs.String("compiler", defaultCompiler, "compiler binary for compile mode")
 		timeout    = fs.Duration("timeout", 0, "outer per-command timeout (0 derives from the phase limits)")
 
-		judgerPath     = fs.String("judger", defaultJudgerPath, "external alpha.4 Judger binary")
-		judgerSHA      = fs.String("judger-sha256", judgerAlpha4AMD64SHA256, "required Judger binary SHA-256 (empty disables)")
-		containerID    = fs.String("container-id", "", "CONTAINER_ID exported to Judger; selects sandbox-<id>")
-		expectedParent = fs.String("expected-cgroup-parent", defaultExpectedCgroupParent, "delegated cgroup parent every sample must be beneath")
-		uid            = fs.Int("uid", -1, "sandbox uid (-1 uses the Judger default 65534)")
-		gid            = fs.Int("gid", -1, "sandbox gid (-1 uses the Judger default 65534)")
-		seccompRule    = fs.String("seccomp-rule", defaultSeccompRule, "seccomp rule name")
-		maxCPUTime     = fs.Int("max-cpu-time", defaultMaxCPUTimeMs, "max CPU time in milliseconds")
-		maxRealTime    = fs.Int("max-real-time", defaultMaxRealTimeMs, "max real time in milliseconds")
-		maxMemory      = fs.Int64("max-memory", defaultMaxMemoryBytes, "max memory in bytes")
-		maxStack       = fs.Int64("max-stack", defaultMaxStackBytes, "max stack in bytes")
-		maxOutput      = fs.Int64("max-output-size", defaultMaxOutputBytes, "max output in bytes")
-		maxProcesses   = fs.Int("max-process-number", 0, "max process number (0 leaves Judger unlimited)")
+		judgerPath       = fs.String("judger", defaultJudgerPath, "external alpha.4 Judger binary")
+		judgerSHA        = fs.String("judger-sha256", judgerAlpha4AMD64SHA256, "required Judger binary SHA-256 (empty disables)")
+		containerID      = fs.String("container-id", "", "CONTAINER_ID exported to Judger; selects sandbox-<id>")
+		expectedParent   = fs.String("expected-cgroup-parent", defaultExpectedCgroupParent, "delegated cgroup parent every sample must be beneath")
+		productionCompat = fs.Bool("production-compat", false, "accept the stock alpha.4 root sandbox as uncontained and non-comparable")
+		expectedOutput   = fs.String("expected-output", "", "expected stdout file (required for execute mode)")
+		uid              = fs.Int("uid", -1, "sandbox uid (-1 uses the Judger default 65534)")
+		gid              = fs.Int("gid", -1, "sandbox gid (-1 uses the Judger default 65534)")
+		seccompRule      = fs.String("seccomp-rule", defaultSeccompRule, "seccomp rule name")
+		maxCPUTime       = fs.Int("max-cpu-time", defaultMaxCPUTimeMs, "max CPU time in milliseconds")
+		maxRealTime      = fs.Int("max-real-time", defaultMaxRealTimeMs, "max real time in milliseconds")
+		maxMemory        = fs.Int64("max-memory", defaultMaxMemoryBytes, "max memory in bytes")
+		maxStack         = fs.Int64("max-stack", defaultMaxStackBytes, "max stack in bytes")
+		maxOutput        = fs.Int64("max-output-size", defaultMaxOutputBytes, "max output in bytes")
+		maxProcesses     = fs.Int("max-process-number", 0, "max process number (0 leaves Judger unlimited)")
 	)
 	var envList, runArgs stringList
 	fs.Var(&envList, "env", "sandbox child environment KEY=VALUE (repeatable; default PATH)")
@@ -110,6 +112,8 @@ func run(args []string) error {
 		JudgerSHA256:         *judgerSHA,
 		ContainerID:          *containerID,
 		ExpectedCgroupParent: *expectedParent,
+		ProductionCompat:     *productionCompat,
+		ExpectedOutput:       *expectedOutput,
 		UID:                  *uid,
 		GID:                  *gid,
 		SeccompRule:          *seccompRule,

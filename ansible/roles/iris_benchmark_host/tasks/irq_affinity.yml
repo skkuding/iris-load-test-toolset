@@ -2,7 +2,7 @@
 # Move movable IRQs away from benchmark CPUs and verify effective affinity.
 #
 # Kernel isolation (isolcpus/nohz_full/rcu_nocbs) is intentionally NOT enabled.
-# This role starts with verified cpusets and IRQ affinity, per PROPOSE.md.
+# This role starts with verified cpusets and IRQ affinity, per the benchmark plan.
 
 - name: IRQ | assert housekeeping CPU set is non-empty
   ansible.builtin.assert:
@@ -12,14 +12,12 @@
     quiet: true
 
 - name: IRQ | route movable IRQs to housekeeping CPUs
-  ansible.builtin.command:
-    argv:
-      - "{{ iris_bench_python }}"
-      - "{{ role_path }}/files/iris_bench_set_irq_affinity.py"
-      - "--cpus"
-      - "{{ iris_bench_topology.housekeeping_cpus | join(',') }}"
-      - "--exclude-irqs"
-      - "{{ (iris_bench_irq_exclude | map('string') | join(',')) if iris_bench_irq_exclude | length > 0 else '' }}"
+  ansible.builtin.script:
+    cmd: >-
+      {{ role_path }}/files/iris_bench_set_irq_affinity.py
+      --cpus {{ iris_bench_topology.housekeeping_cpus | join(',') }}
+      --exclude-irqs '{{ (iris_bench_irq_exclude | map('string') | join(',')) if iris_bench_irq_exclude | length > 0 else '' }}'
+    executable: "{{ iris_bench_python }}"
   register: iris_bench_irq_apply
   changed_when: (iris_bench_irq_apply.stdout | from_json).changed_count | int > 0
   failed_when: not ((iris_bench_irq_apply.stdout | default('{}', true) | from_json).ok | default(false) | bool)
