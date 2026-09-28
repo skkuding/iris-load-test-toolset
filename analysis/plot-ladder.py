@@ -46,6 +46,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--out", type=Path, default=Path("ladder-boxplot.png"))
     parser.add_argument("--title", default="Iris load test — raw-sample distributions")
+    parser.add_argument(
+        "--xlabel",
+        default="Workers (direct Judger, production-compat)",
+        help="x-axis label describing the concurrency levels",
+    )
     parser.add_argument("--format", default="png", choices=["png", "svg", "pdf"])
     return parser.parse_args(argv)
 
@@ -113,6 +118,7 @@ def load_run(run_dir: Path) -> tuple[dict[str, list[float]], float | None]:
     cpu: list[float] = []
     real: list[float] = []
     mem: list[float] = []
+    e2e: list[float] = []
     for record in successful:
         if isinstance(record.get("cpuTimeMs"), (int, float)):
             cpu.append(float(record["cpuTimeMs"]))
@@ -120,7 +126,9 @@ def load_run(run_dir: Path) -> tuple[dict[str, list[float]], float | None]:
             real.append(float(record["realTimeMs"]))
         if isinstance(record.get("memoryBytes"), (int, float)):
             mem.append(float(record["memoryBytes"]) / 1048576.0)
-    return {"cpu": cpu, "real": real, "mem": mem}, window_seconds
+        if isinstance(record.get("endToEndMs"), (int, float)):
+            e2e.append(float(record["endToEndMs"]))
+    return {"cpu": cpu, "real": real, "mem": mem, "e2e": e2e}, window_seconds
 
 
 def percentile(values: list[float], p: float) -> float:
@@ -194,14 +202,16 @@ def main(argv: list[str]) -> int:
         "#c39bd3", "#f5a9b8", "#a3d9a5", "#f7dc9b", "#b0a8d8",
     ]
 
-    fig, axes = plt.subplots(3, 1, figsize=(11.5, 12.6))
-    fig.suptitle(args.title, fontsize=17, fontweight="bold")
-
     panels = [
         ("cpu", "CPU time (ms) by worker count", "CPU time (ms)"),
         ("real", "Real time (ms) by worker count", "Real time (ms)"),
         ("mem", "Memory (MiB) by worker count", "Memory (MiB)"),
     ]
+    if any(data[label].get("e2e") for label in labels):
+        panels.append(("e2e", "End-to-end latency (ms) by worker count", "End-to-end (ms)"))
+
+    fig, axes = plt.subplots(len(panels), 1, figsize=(11.5, 4.2 * len(panels)))
+    fig.suptitle(args.title, fontsize=17, fontweight="bold")
     for ax, (key, subtitle, ylabel) in zip(axes, panels):
         series = [data[label][key] for label in labels]
         usable = [values for values in series if values]
@@ -223,7 +233,7 @@ def main(argv: list[str]) -> int:
             patch.set_edgecolor("#333333")
         ax.set_title(subtitle, loc="left", fontsize=13, fontweight="bold")
         ax.set_ylabel(ylabel)
-        ax.set_xlabel("Workers (direct Judger, production-compat)")
+        ax.set_xlabel(args.xlabel)
         ax.grid(True, axis="y", alpha=0.3)
         ax.margins(y=0.08)
 
