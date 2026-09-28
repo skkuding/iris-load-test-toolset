@@ -5,7 +5,8 @@ reported by Iris and Judger. Start with `docs/WAVE1-REPLICATION.md` for the
 operator procedure. The private benchmark plan and progress log are maintained
 outside this repository.
 
-This repository currently implements the **direct Judger foundation**:
+This repository implements the direct Judger foundation and an external-data
+full-Iris suite:
 
 - a read-only host qualifier and an idempotent Ansible benchmark-host role;
 - live, isolated AWS benchmark resources (`codedang-iris-benchmark` RDS clone,
@@ -13,9 +14,11 @@ This repository currently implements the **direct Judger foundation**:
 - an immutable, digest-pinned run plan (`internal/runplan`);
 - a controller, `iris-benchctl`, and a host agent, `iris-bench-agent`;
 - a checksum-pinned direct runner, `judger-bench`, and its image.
+- digest-pinned local RabbitMQ plus production Iris containers, queue-prefilled
+  synchronized startup, benchmark RDS/S3 reads, and AMQP message conservation.
 
-The full-Iris/AMQP suite, topology auto-assignment, and privileged real-host validation are **not** implemented in
-this build. See [Not supported in this build](#not-supported-in-this-build).
+See [Full Iris external-data benchmark](docs/FULL-IRIS-EXTERNAL.md) for the
+operator procedure and validated runs.
 
 ## Safety boundary
 
@@ -97,10 +100,10 @@ iris-benchctl analyze --run RUN_DIRECTORY
 | Command | State | Behavior |
 | --- | --- | --- |
 | `plan` | Implemented | Resolves and prints the immutable run plan JSON (stdout) and its SHA-256 (stderr). No mutation. |
-| `run` | Implemented | Stages sealed direct-suite assets, then runs `inspect` -> `prepare`/qualification -> every `run-block` -> `validate` -> `cleanup` -> `bundle`. Does not `collect` (run `collect` afterward). |
+| `run` | Implemented | Stages sealed direct or external-Iris assets, then runs `inspect` -> `prepare`/qualification -> every `run-block` -> `validate` -> `cleanup` -> `bundle`. Does not `collect` (run `collect` afterward). |
 | `collect` | Implemented | Downloads and hash-verifies a bundle inventory, requires qualification/validation/cleanup evidence, secret-scans it, and writes `manifest.json`, `checksums.sha256`, `collection.json`, and `COMPLETE`. |
 | `status` | Implemented | Prints local persisted state, or queries the remote agent with `--host`. |
-| `analyze` | Implemented (direct suite) | Aggregates collected `samples/*.ndjson` in lexical order and prints timing statistics plus a telemetry-backed comparability decision as JSON. |
+| `analyze` | Implemented | Aggregates collected `samples/*.ndjson` and reports execution timing, optional full-Iris end-to-end latency, and telemetry-backed comparability. |
 | `provision`, `qualify`, `resume` | Not implemented | Print `not implemented in the minimum viable core` and exit non-zero. |
 
 `plan` and `run` share the plan flags:
@@ -403,9 +406,9 @@ At least one host must have `"allow": true`, and the `--host` alias must match.
 `limits.maxLoad1` defaults to the conservative value `1.0`, must be positive,
 and is sealed into `qualification.maxLoad1`; prepare rejects a missing,
 malformed, or higher one-minute host load.
-Note: the config accepts `suite: "iris"` and a `turbo` value, but the agent
-refuses a non-`judger` block, and `turbo` is validated then dropped from
-the plan (turbo is controlled by the Ansible host role, not the controller).
+The `iris` suite is the external-data mode documented in
+`docs/FULL-IRIS-EXTERNAL.md`. `turbo` is validated then dropped from the plan
+(turbo is controlled by the Ansible host role, not the controller).
 `numaPolicy` is carried in the plan but the agent currently assigns one
 `cpuset.mems` value to every worker (`--cpuset-mems`, default `0`); per-worker
 NUMA policy is not applied yet. `cpuList` is split round-robin across workers
@@ -779,12 +782,9 @@ the scoped agent.
 ## Not supported in this build
 
 - `iris-benchctl provision`, `qualify`, and `resume`.
-- The full-Iris suite and AMQP. There is no `internal/amqp` package, no
-  RabbitMQ lifecycle, no publisher/collector, and no message-conservation
-  validation. The agent refuses any block whose suite is not `judger`.
-  `iris.rabbitmqImage` is carried into a plan when configured but is unused.
-- RDS- and S3-backed judge data paths in the runner. The AWS workflow prepares
-  the database and fixtures, but the agent does not read from them.
+- Embedded-testcase full-Iris modes and the client-api HTTP submission path.
+- Production RabbitMQ TLS/operator clustering; the benchmark broker is a
+  digest-pinned, run-local single node on an isolated vhost.
 - Topology-aware CPU/NUMA auto-assignment. `cpuList` is operator-supplied and
   `numaPolicy` is recorded but not enforced.
 - Privileged real-host validation in tests/CI; only fake-filesystem unit tests

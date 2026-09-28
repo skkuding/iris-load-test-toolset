@@ -1,16 +1,13 @@
 # Wave 1 Replication Manual (Toolset Operator)
 
-Last reviewed: 2026-09-25
+Last reviewed: 2026-09-27
 
-> **Read this first — what is reproducible today.** In this build, only local
-> integrity checks, host planning, and dry-run inspection are reproducible from
-> the repository alone. The full measurement path is blocked and must not be
-> promised: Track A artifacts are not in this repository, the full-Iris/AMQP
-> ladder is unimplemented, and the isolated Judger containment gate fails
-> closed. The direct controller can stage fixtures, a precompiled workload, and
-> a version-matched agent; it never compiles arbitrary source. A real run is possible only in
-> explicit `--production-compat` mode, and is marked uncontained and
-> non-comparable to isolated runs. Full Iris/AMQP remains unavailable.
+> **Read this first — what is reproducible today.** Track A's original
+> Kubernetes artifacts remain outside this repository, and isolated Judger
+> containment still fails closed. Track B supports both the direct Judger suite
+> and the standalone external-data full-Iris suite documented in
+> `FULL-IRIS-EXTERNAL.md`. Both use explicit `--production-compat` mode with
+> stock alpha.4 and are marked uncontained and non-comparable.
 
 This is the operator manual for reproducing the original **Wave 1** Iris
 runtime-reproducibility experiment. It is written so that a new operator, on a
@@ -466,9 +463,9 @@ As of this review, the following are honest limits:
   `--local-agent` and verifies its remote SHA-256 before execution. The alpha.4
   Judger binary is downloaded by the image build; neither ships as a committed
   binary.
-- **Isolated measurement remains gated.** Production-compat diagnostics can be
-  accepted but are non-comparable. Gate 0 and full Iris/AMQP still block an
-  isolated Wave 1 end-to-end measurement.
+- **Isolated measurement remains gated.** Production-compat direct and
+  full-Iris diagnostics can be accepted but are non-comparable. Gate 0 still
+  blocks an isolated Wave 1 end-to-end measurement.
 - **Hand off a clean tree.** Use a normal clone or an archive that excludes
   untracked, secret-bearing files such as `terraform.tfvars`, `*.tfstate*`,
   `.env`, and `.terraform/`. Do not package a live working directory as-is.
