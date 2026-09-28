@@ -100,25 +100,57 @@ bin/iris-benchctl collect \
 bin/iris-benchctl analyze --run runs/iris-YYYYMMDD-fulliris
 ```
 
-`external-1` uses one Iris replica and five requests. `external-4` uses four
-replicas and twenty requests. Both assign one CPU to each Iris container; the
-alpha.4 submission cgroups remain uncontained, matching production behavior.
+`config/full-iris-external.json` defines `external-1`, `external-2`, `external-4`,
+`external-8`, `external-16`, and `external-30`. Every profile submits 50
+requests per replica, so the totals are 50/100/200/400/800/1500. Each Iris
+container is assigned one CPU; the alpha.4 submission cgroups remain
+uncontained, matching production behavior.
 
 ## Validated runs
 
-- `iris-20260927-fulliris-production1`: five of five requests passed; five testcase
-  and five terminal results; RDS reported two active rows for problem 568;
-  CPU median 384 ms, real median 417 ms, end-to-end median 3519 ms.
-- `iris-20260927-fulliris-production4`: twenty of twenty requests passed after queue
-  prefill and four-container barrier release; twenty testcase and twenty
-  terminal results; RDS reported two active rows; CPU median 416.5 ms, real
-  median 445.5 ms, end-to-end median 5654 ms.
+A single 1/2/4/8/16/30 ladder and five reboot rounds of the same ladder were
+collected on 2026-09-27. Every run conserved all messages: no duplicates,
+redeliveries, missing or unexpected records, empty final queues, and zero
+residual containers, networks, or sandbox cgroups. RDS reported two active rows
+for problem 568 in every run.
 
-Both runs had zero duplicates, redeliveries, missing/unexpected messages,
-thermal throttling, residual containers, residual networks, and residual
-sandbox cgroups. Their manifests are non-comparable because the current host
-qualification report failed an unrelated delegated `cpuset` check and because
-production-compatible alpha.4 execution is uncontained.
+Single-ladder medians (50 submissions per replica):
+
+| Replicas | Requests | Duration | CPU median | Real median | E2E median |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 50 | 55.2 s | 383 ms | 417 ms | 24322 ms |
+| 2 | 100 | 57.9 s | 395 ms | 432 ms | 25835 ms |
+| 4 | 200 | 61.9 s | 399 ms | 433.5 ms | 28387 ms |
+| 8 | 400 | 67.9 s | 440.5 ms | 480 ms | 32620 ms |
+| 16 | 800 | 82.7 s | 496 ms | 540.5 ms | 39866 ms |
+| 30 | 1500 | 104.9 s | 555 ms | 611 ms | 58087 ms |
+
+Five reboot rounds (bundles `runs/iris-20260927-r{1..5}-{1,2,4,8,16,30}x/`)
+gave the per-level median-of-medians and spread below.
+
+| Replicas | CPU median | CPU spread | Real median | Real spread | E2E median | E2E spread |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 383 ms | 0.26 % | 415.5 ms | 0.24 % | 26262 ms | 1.70 % |
+| 2 | 394 ms | 2.03 % | 432.5 ms | 3.01 % | 25648 ms | 1.33 % |
+| 4 | 404 ms | 2.23 % | 438 ms | 2.28 % | 28352 ms | 1.82 % |
+| 8 | 442 ms | 0.68 % | 479 ms | 1.25 % | 32377 ms | 2.63 % |
+| 16 | 497 ms | 0.20 % | 541 ms | 0.55 % | 40215 ms | 0.92 % |
+| 30 | 553 ms | 0.54 % | 611 ms | 0.33 % | 58101 ms | 4.15 % |
+
+Figures: `docs/images/fulliris-ladder.png` (single ladder),
+`docs/images/fulliris-reboot-aggregate.png` (5-round pooled distributions), and
+`docs/images/fulliris-reboot-drift.png` (per-round medians). Reproduce them with
+`analysis/plot-ladder.py` and `analysis/plot-repetition.py`.
+
+The first 30-replica attempt measured and conserved correctly but failed in
+teardown because it removed one sandbox root per worker inside a shared 30 s
+budget. Teardown now validates every root and removes them all with a single
+privileged helper on a dedicated 5-minute budget; the re-run
+`iris-20260927-ladder-30x-r2` finished with zero residue.
+
+All manifests are non-comparable because the current host qualification report
+failed an unrelated delegated `cpuset` check and because production-compatible
+alpha.4 execution is uncontained.
 
 ## Limitations
 
