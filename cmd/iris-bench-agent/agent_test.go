@@ -766,14 +766,14 @@ func TestValidateRejectsMissingBlockTelemetry(t *testing.T) {
 	}
 }
 
-func TestRunBlockRejectsIrisSuite(t *testing.T) {
+func TestRunBlockRejectsUnknownSuite(t *testing.T) {
 	a, _, _, _ := newRunBlockAgent(t)
-	sha := stageReadyRun(t, a, "iris", 1)
+	sha := stageReadyRun(t, a, "unknown", 1)
 	_, terminal, err := execAgent(t, a, request(protocol.ActionRunBlock, sha, "block-01"))
 	if !errors.Is(err, errTerminalFailed) {
 		t.Fatalf("err = %v", err)
 	}
-	if terminal.Status != protocol.StatusUnsupported {
+	if terminal.Status != protocol.StatusFailed {
 		t.Fatalf("terminal = %+v", terminal)
 	}
 }

@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Offline AWS CLI for build-iris-runtime-env.sh tests.
+set -euo pipefail
+
+: "${FAKE_AWS_LOG:?}"
+printf '%s\n' "$*" >>"${FAKE_AWS_LOG}"
+cmd="${1:-} ${2:-}"
+if [ $# -ge 2 ]; then shift 2; else shift $#; fi
+
+case "${cmd}" in
+  "secretsmanager get-secret-value")
+    cat "${FAKE_RO_SECRET_FILE:?}"
+    ;;
+  "sts assume-role")
+    printf '%s\n' '{"AccessKeyId":"FAKE_ACCESS_KEY","SecretAccessKey":"FAKE_SECRET_KEY","SessionToken":"FAKE_SESSION_TOKEN"}'
+    ;;
+  *)
+    printf 'fake runtime AWS: unexpected invocation: %s %s\n' "${cmd}" "$*" >&2
+    exit 42
+    ;;
+esac

@@ -35,10 +35,22 @@ type planOptions struct {
 	suite               string
 	runID               string
 	irisDigest          string
+	rabbitmqDigest      string
 	judgerDigest        string
 	judgerDigestFile    string
 	benchmarkImage      string
 	resolveImage        bool
+	irisSource          string
+	irisEnvFile         string
+	problemID           int
+	language            string
+	timeLimitMS         int
+	memoryLimitBytes    int64
+	testcasesPerRequest int
+	messageIDStart      int64
+	rdsGeneration       string
+	s3ObjectSet         string
+	s3Bucket            string
 	seed                int64
 	fixtures            stringList
 	expectedOutputs     stringList
@@ -57,10 +69,11 @@ func (o *planOptions) register(fs *flag.FlagSet) {
 	fs.StringVar(&o.suite, "suite", "", "override suite (judger or iris)")
 	fs.StringVar(&o.runID, "run-id", "", "explicit run id (default generated)")
 	fs.StringVar(&o.irisDigest, "iris-digest", "", "resolved Iris manifest digest (sha256:...)")
+	fs.StringVar(&o.rabbitmqDigest, "rabbitmq-digest", "", "resolved RabbitMQ manifest digest (sha256:...)")
 	fs.StringVar(&o.judgerDigest, "judger-digest", "", "Judger artifact SHA-256 (raw hex or sha256:...)")
 	fs.StringVar(&o.judgerDigestFile, "judger-digest-file", "", "file whose SHA-256 is the Judger digest")
 	fs.StringVar(&o.benchmarkImage, "benchmark-image", "", "immutable local judger-bench Docker image ID (sha256:<64 lowercase hex>)")
-	fs.BoolVar(&o.resolveImage, "resolve-image", false, "resolve the Iris tag with docker buildx imagetools")
+	fs.BoolVar(&o.resolveImage, "resolve-image", false, "resolve Iris and RabbitMQ tags with docker buildx imagetools")
 	fs.Int64Var(&o.seed, "seed", 1, "run random seed")
 	fs.Var(&o.fixtures, "fixture", "fixture name=path (repeatable)")
 	fs.Var(&o.expectedOutputs, "expected-output", "expected output name=path (repeatable; must match --fixture)")
@@ -68,6 +81,17 @@ func (o *planOptions) register(fs *flag.FlagSet) {
 	fs.StringVar(&o.benchBinarySHA, "bench-binary-sha256", "", "SHA-256 of the REMOTE --bench-binary")
 	fs.BoolVar(&o.productionCompat, "production-compat", false, "accept stock alpha.4 root-level sandbox cgroups as an uncontained, non-comparable population")
 	fs.StringVar(&o.sshControlPath, "ssh-control-path", "", "explicit OpenSSH ControlPath (default <socketDir>/iris-bench-<host>)")
+	fs.StringVar(&o.irisSource, "iris-source", "", "local Iris source file for the external-data suite")
+	fs.StringVar(&o.irisEnvFile, "iris-env-file", "", "local Iris secret environment file for the external-data suite")
+	fs.IntVar(&o.problemID, "problem-id", 0, "Iris problem ID")
+	fs.StringVar(&o.language, "language", "Cpp", "Iris language")
+	fs.IntVar(&o.timeLimitMS, "time-limit-ms", 0, "Iris time limit in milliseconds")
+	fs.Int64Var(&o.memoryLimitBytes, "memory-limit-bytes", 0, "Iris memory limit in bytes")
+	fs.IntVar(&o.testcasesPerRequest, "testcases-per-request", 1, "Iris testcases per request")
+	fs.Int64Var(&o.messageIDStart, "message-id-start", 2000001, "Iris first message ID")
+	fs.StringVar(&o.rdsGeneration, "rds-generation", "", "Iris RDS generation")
+	fs.StringVar(&o.s3ObjectSet, "s3-object-set", "", "Iris S3 object set")
+	fs.StringVar(&o.s3Bucket, "s3-bucket", "", "Iris S3 bucket")
 }
 
 func loadConfig(path string) (config.Config, error) {
@@ -103,6 +127,16 @@ func (o *planOptions) buildPlan(ctx context.Context, cfg config.Config) (runplan
 	default:
 		return runplan.Plan{}, "", fmt.Errorf("invalid suite %q", suite)
 	}
+	if suite == "iris" {
+		if !o.productionCompat {
+			return runplan.Plan{}, "", errors.New("iris suite requires --production-compat")
+		}
+		if len(o.fixtures) != 0 || len(o.expectedOutputs) != 0 || o.benchBinary != "" || o.benchBinarySHA != "" || o.localBenchBinary != "" {
+			return runplan.Plan{}, "", errors.New("iris suite rejects direct fixtures and workload flags")
+		}
+	} else if o.irisSource != "" || o.irisEnvFile != "" || o.problemID != 0 || o.language != "" && o.language != "Cpp" || o.timeLimitMS != 0 || o.memoryLimitBytes != 0 || o.testcasesPerRequest != 0 && o.testcasesPerRequest != 1 || o.messageIDStart != 0 && o.messageIDStart != 2000001 || o.rdsGeneration != "" || o.s3ObjectSet != "" || o.s3Bucket != "" || o.rabbitmqDigest != "" {
+		return runplan.Plan{}, "", errors.New("Iris-only flags require --suite=iris")
+	}
 	runID := o.runID
 	if runID == "" {
 		id, err := runplan.GenerateRunID(time.Now(), rand.Reader)
@@ -111,9 +145,13 @@ func (o *planOptions) buildPlan(ctx context.Context, cfg config.Config) (runplan
 		}
 		runID = id
 	}
-	fixtures, err := o.resolveFixtures(runID)
-	if err != nil {
-		return runplan.Plan{}, "", err
+	var fixtures []runplan.Fixture
+	var err error
+	if suite == "judger" {
+		fixtures, err = o.resolveFixtures(runID)
+		if err != nil {
+			return runplan.Plan{}, "", err
+		}
 	}
 	irisDigest := o.irisDigest
 	if irisDigest == "" && o.resolveImage {
@@ -123,13 +161,26 @@ func (o *planOptions) buildPlan(ctx context.Context, cfg config.Config) (runplan
 			return runplan.Plan{}, "", err
 		}
 	}
+	rabbitDigest := o.rabbitmqDigest
+	if suite == "iris" && rabbitDigest == "" && o.resolveImage {
+		resolver := runplan.DockerResolver{Runner: transport.OSExecer{}}
+		rabbitRef := cfg.Iris.RabbitMQImage
+		rabbitResolved, err := resolver.Resolve(ctx, rabbitRef)
+		if err != nil {
+			return runplan.Plan{}, "", err
+		}
+		rabbitDigest = rabbitResolved
+	}
 	judger, err := o.resolveJudger()
 	if err != nil {
 		return runplan.Plan{}, "", err
 	}
-	workload, err := o.resolveWorkload(runID)
-	if err != nil {
-		return runplan.Plan{}, "", err
+	var workload runplan.StagedFile
+	if suite == "judger" {
+		workload, err = o.resolveWorkload(runID)
+		if err != nil {
+			return runplan.Plan{}, "", err
+		}
 	}
 	qualification := runplan.Qualification{RequireCgroupV2: true, MinPhysicalCores: 1, MaxLoad1: cfg.Limits.MaxLoad1, MaxRunSeconds: cfg.Limits.MaxRunSeconds}
 	if o.qualificationReport != "" {
@@ -148,11 +199,19 @@ func (o *planOptions) buildPlan(ctx context.Context, cfg config.Config) (runplan
 		}
 		images["judger-bench"] = runplan.Image{Reference: o.benchmarkImage, Digest: o.benchmarkImage}
 	}
-	if o.productionCompat && o.benchmarkImage == "" {
+	if suite == "judger" && o.productionCompat && o.benchmarkImage == "" {
 		return runplan.Plan{}, "", errors.New("--production-compat requires --benchmark-image")
 	}
 	if cfg.Iris.RabbitMQImage != "" {
-		images["rabbitmq"] = runplan.Image{Reference: cfg.Iris.RabbitMQImage}
+		images["rabbitmq"] = runplan.Image{Reference: cfg.Iris.RabbitMQImage, Digest: rabbitDigest}
+	}
+	var irisSuite *runplan.IrisSuite
+	if suite == "iris" {
+		source, env, err := o.resolveIrisFiles(runID)
+		if err != nil {
+			return runplan.Plan{}, "", err
+		}
+		irisSuite = &runplan.IrisSuite{Mode: "external-data", Source: source, SecretEnvironment: env, ProblemID: o.problemID, Language: o.language, TimeLimitMS: o.timeLimitMS, MemoryLimitBytes: o.memoryLimitBytes, TestcasesPerRequest: o.testcasesPerRequest, MessageIDStart: o.messageIDStart, S3Bucket: o.s3Bucket}
 	}
 	blockID := o.profile + "-01"
 	plan, err := runplan.Build(runplan.BuildInput{
@@ -183,6 +242,9 @@ func (o *planOptions) buildPlan(ctx context.Context, cfg config.Config) (runplan
 		}},
 		Qualification: qualification,
 		Cleanup:       runplan.Cleanup{RemoveContainers: true, RemoveRunDir: true, PreserveEvidence: true},
+		IrisSuite:     irisSuite,
+		RDSGeneration: o.rdsGeneration,
+		S3ObjectSet:   o.s3ObjectSet,
 	})
 	if err != nil {
 		return runplan.Plan{}, "", err
@@ -195,6 +257,21 @@ func (o *planOptions) buildPlan(ctx context.Context, cfg config.Config) (runplan
 		return runplan.Plan{}, "", err
 	}
 	return plan, sha, nil
+}
+
+func (o *planOptions) resolveIrisFiles(runID string) (runplan.StagedFile, runplan.StagedFile, error) {
+	if o.irisSource == "" || o.irisEnvFile == "" {
+		return runplan.StagedFile{}, runplan.StagedFile{}, errors.New("iris suite requires --iris-source and --iris-env-file")
+	}
+	sourceSum, _, err := artifact.HashFile(o.irisSource)
+	if err != nil {
+		return runplan.StagedFile{}, runplan.StagedFile{}, fmt.Errorf("iris source: %w", err)
+	}
+	envSum, _, err := artifact.HashFile(o.irisEnvFile)
+	if err != nil {
+		return runplan.StagedFile{}, runplan.StagedFile{}, fmt.Errorf("iris env file: %w", err)
+	}
+	return runplan.StagedFile{Path: stagedPath(runID, "iris-source"), SHA256: sourceSum}, runplan.StagedFile{Path: stagedPath(runID, "iris-env"), SHA256: envSum}, nil
 }
 
 func (o *planOptions) resolveFixtures(runID string) ([]runplan.Fixture, error) {

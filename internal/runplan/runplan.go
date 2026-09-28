@@ -64,6 +64,20 @@ type StagedFile struct {
 	SHA256 string `json:"sha256"`
 }
 
+// IrisSuite describes an external-data Iris measurement.
+type IrisSuite struct {
+	Mode                string     `json:"mode"`
+	Source              StagedFile `json:"source"`
+	SecretEnvironment   StagedFile `json:"secretEnvironment"`
+	ProblemID           int        `json:"problemId"`
+	Language            string     `json:"language"`
+	TimeLimitMS         int        `json:"timeLimitMs"`
+	MemoryLimitBytes    int64      `json:"memoryLimitBytes"`
+	TestcasesPerRequest int        `json:"testcasesPerRequest"`
+	MessageIDStart      int64      `json:"messageIdStart"`
+	S3Bucket            string     `json:"s3Bucket"`
+}
+
 // Block is one controlled measurement unit.
 type Block struct {
 	ID          string `json:"id"`
@@ -119,6 +133,7 @@ type Plan struct {
 	Qualification             Qualification    `json:"qualification"`
 	Expected                  Expected         `json:"expected"`
 	Cleanup                   Cleanup          `json:"cleanup"`
+	IrisSuite                 *IrisSuite       `json:"irisSuite,omitempty"`
 }
 
 // BuildInput is the caller-supplied, pre-resolution plan description.
@@ -141,6 +156,7 @@ type BuildInput struct {
 	Qualification             Qualification
 	Expected                  Expected
 	Cleanup                   Cleanup
+	IrisSuite                 *IrisSuite
 }
 
 // Build validates input and returns a structurally valid plan. It does not
@@ -166,6 +182,7 @@ func Build(in BuildInput) (Plan, error) {
 		Qualification:             in.Qualification,
 		Expected:                  in.Expected,
 		Cleanup:                   in.Cleanup,
+		IrisSuite:                 in.IrisSuite,
 	}
 	for k, v := range in.Images {
 		if v.Reference == "" && k == "iris" {
@@ -241,6 +258,9 @@ func (p Plan) Validate() error {
 		if b.Repetitions < 0 {
 			return fmt.Errorf("runplan: block %q: repetitions must not be negative", b.ID)
 		}
+		if p.Suite == "iris" && (b.Suite != p.Suite || b.Repetitions < 1) {
+			return fmt.Errorf("runplan: iris block %q must match suite and have positive repetitions", b.ID)
+		}
 	}
 	iris, ok := p.Images["iris"]
 	if !ok || iris.Reference == "" {
@@ -259,7 +279,7 @@ func (p Plan) Validate() error {
 			return errors.New("runplan: judger-bench image must be an immutable local image ID sealed as matching reference and digest")
 		}
 	}
-	if p.ContainmentMode == ContainmentProductionCompat {
+	if p.Suite == "judger" && p.ContainmentMode == ContainmentProductionCompat {
 		if _, ok := p.Images["judger-bench"]; !ok {
 			return errors.New("runplan: production-compat requires a judger-bench OCI image")
 		}
@@ -278,6 +298,32 @@ func (p Plan) Validate() error {
 	if p.Suite == "judger" {
 		if !validStagedFile(p.WorkloadBinary) {
 			return errors.New("runplan: direct judger workload binary path and sha256 are required")
+		}
+	}
+	if p.Suite == "iris" {
+		if p.ContainmentMode != ContainmentProductionCompat {
+			return errors.New("runplan: iris suite requires production-compat containment")
+		}
+		if p.IrisSuite == nil {
+			return errors.New("runplan: iris suite configuration is required")
+		}
+		if len(p.Fixtures) != 0 || p.WorkloadBinary.Path != "" || p.WorkloadBinary.SHA256 != "" {
+			return errors.New("runplan: iris suite does not accept direct fixtures or workload")
+		}
+		if !validStagedFile(p.IrisSuite.Source) || !validStagedFile(p.IrisSuite.SecretEnvironment) {
+			return errors.New("runplan: iris source and secret environment staged files are invalid")
+		}
+		if p.IrisSuite.Mode != "external-data" || p.IrisSuite.ProblemID <= 0 || p.IrisSuite.Language == "" || p.IrisSuite.TimeLimitMS <= 0 || p.IrisSuite.MemoryLimitBytes <= 0 || p.IrisSuite.TestcasesPerRequest <= 0 || p.IrisSuite.MessageIDStart <= 0 || p.IrisSuite.S3Bucket == "" {
+			return errors.New("runplan: iris suite fields must be positive and mode must be external-data")
+		}
+		if p.RDSGeneration == "" || p.S3ObjectSet == "" {
+			return errors.New("runplan: iris suite requires rds generation and s3 object set")
+		}
+		if p.IrisSuite.MessageIDStart > 0 && int64(p.Blocks[0].Workers)*int64(p.Blocks[0].Repetitions) > (1<<63-1)-p.IrisSuite.MessageIDStart {
+			return errors.New("runplan: iris message ID range overflows")
+		}
+		if img, ok := p.Images["rabbitmq"]; !ok || img.Reference == "" {
+			return errors.New("runplan: iris suite requires a rabbitmq image")
 		}
 	}
 	if p.Qualification.Report != nil && (!validStagedFile(*p.Qualification.Report) || !strings.HasPrefix(p.Qualification.Report.Path, "/tmp/")) {
@@ -301,6 +347,12 @@ func (p Plan) ValidateRunnable() error {
 	iris := p.Images["iris"]
 	if iris.Digest == "" {
 		return fmt.Errorf("runplan: iris image %q has no resolved digest", iris.Reference)
+	}
+	if p.Suite == "iris" {
+		rabbit, ok := p.Images["rabbitmq"]
+		if !ok || rabbit.Digest == "" {
+			return errors.New("runplan: rabbitmq image has no resolved digest")
+		}
 	}
 	if p.JudgerDigest == "" {
 		return errors.New("runplan: judger digest is required before execution")

@@ -104,6 +104,20 @@ func TestNDJSONRequiresSuccessfulMeasurement(t *testing.T) {
 	}
 }
 
+func TestNDJSONSummarizesOptionalEndToEndLatency(t *testing.T) {
+	input := strings.Join([]string{
+		`{"status":"success","cpuTimeMs":10,"realTimeMs":12,"endToEndMs":100}`,
+		`{"status":"success","cpuTimeMs":11,"realTimeMs":13,"endToEndMs":200}`,
+	}, "\n") + "\n"
+	summary, err := NDJSON(strings.NewReader(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.EndToEndMs == nil || summary.EndToEndMs.Median != 150 {
+		t.Fatalf("end-to-end summary = %+v", summary.EndToEndMs)
+	}
+}
+
 func assertNear(t *testing.T, got, want float64) {
 	t.Helper()
 	if math.Abs(got-want) > 1e-9 {

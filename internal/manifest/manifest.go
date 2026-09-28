@@ -44,6 +44,7 @@ type Manifest struct {
 	Overrides            []string                 `json:"overrides,omitempty"`
 	Comparable           bool                     `json:"comparable"`
 	ContainmentMode      string                   `json:"containmentMode"`
+	Suite                string                   `json:"suite,omitempty"`
 }
 
 // Build derives a manifest from a plan and run identity.
@@ -66,6 +67,7 @@ func Build(plan runplan.Plan, planSHA256, agentVersion, gitCommit string, dirty 
 		Fixtures:             append([]runplan.Fixture(nil), plan.Fixtures...),
 		Comparable:           true,
 		ContainmentMode:      plan.ContainmentMode,
+		Suite:                plan.Suite,
 	}
 	if plan.ContainmentMode == runplan.ContainmentProductionCompat {
 		m.MarkOverride("stock Judger alpha.4 root-level sandbox cgroups; uncontained production-compat population")
@@ -104,7 +106,7 @@ func (m Manifest) Validate() error {
 	if m.JudgerDigest != "" && !strings.HasPrefix(m.JudgerDigest, "sha256:") {
 		return fmt.Errorf("manifest: judger digest must be a sha256 reference")
 	}
-	if !artifact.ValidSHA256(m.WorkloadBinarySHA256) {
+	if m.Suite != "iris" && !artifact.ValidSHA256(m.WorkloadBinarySHA256) {
 		return errors.New("manifest: invalid workload binary digest")
 	}
 	for _, o := range m.Outcomes {

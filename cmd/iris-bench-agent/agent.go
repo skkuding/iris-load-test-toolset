@@ -18,6 +18,7 @@ import (
 	"github.com/skkuding/iris-load-test-toolset/internal/artifact"
 	"github.com/skkuding/iris-load-test-toolset/internal/containment"
 	"github.com/skkuding/iris-load-test-toolset/internal/experiment"
+	"github.com/skkuding/iris-load-test-toolset/internal/fulliris"
 	"github.com/skkuding/iris-load-test-toolset/internal/protocol"
 	"github.com/skkuding/iris-load-test-toolset/internal/qualification"
 	"github.com/skkuding/iris-load-test-toolset/internal/runplan"
@@ -411,11 +412,6 @@ func (a *agent) runBlock(ctx context.Context, req protocol.Request, enc *protoco
 	}
 	_ = enc.Emit(protocol.Event{Kind: protocol.KindCheck, Name: "plan-digest", Status: protocol.StatusPassed})
 
-	if a.cgroupParent == "" {
-		_ = enc.Emit(protocol.Event{Kind: protocol.KindCheck, Name: "cgroup-delegation", Status: protocol.StatusUnsupported, Message: "no delegated cgroup parent configured"})
-		return a.unsupported(enc, "run-block requires --cgroup-parent naming an explicitly delegated cgroup v2 subtree")
-	}
-
 	plan, err := a.loadPlan(req.RunID)
 	if err != nil {
 		_ = enc.Emit(protocol.Event{Kind: protocol.KindCheck, Name: "plan", Status: protocol.StatusFailed, Message: sanitize(err.Error())})
@@ -425,9 +421,15 @@ func (a *agent) runBlock(ctx context.Context, req protocol.Request, enc *protoco
 	if !ok {
 		return a.fail(enc, "unknown block id "+req.BlockID)
 	}
+	if block.Suite == "judger" && a.cgroupParent == "" {
+		_ = enc.Emit(protocol.Event{Kind: protocol.KindCheck, Name: "cgroup-delegation", Status: protocol.StatusUnsupported, Message: "no delegated cgroup parent configured"})
+		return a.unsupported(enc, "run-block requires --cgroup-parent naming an explicitly delegated cgroup v2 subtree")
+	}
+	if block.Suite == "iris" {
+		return a.runIrisBlock(ctx, req, enc, plan, block)
+	}
 	if block.Suite != "judger" {
-		_ = enc.Emit(protocol.Event{Kind: protocol.KindCheck, Name: "suite", Status: protocol.StatusUnsupported, Message: "suite=" + block.Suite})
-		return a.unsupported(enc, "run-block supports only the direct judger suite in this build, got "+block.Suite)
+		return a.fail(enc, "unknown block suite "+block.Suite)
 	}
 	specs, err := a.buildWorkerSpecs(req, block, plan)
 	if err != nil {
@@ -507,6 +509,77 @@ func (a *agent) runBlock(ctx context.Context, req protocol.Request, enc *protoco
 		return a.fail(enc, err.Error())
 	}
 	return a.complete(enc, receipt)
+}
+
+func (a *agent) runIrisBlock(ctx context.Context, req protocol.Request, enc *protocol.EventEncoder, plan runplan.Plan, block runplan.Block) error {
+	if plan.IrisSuite == nil {
+		return a.fail(enc, "iris suite configuration is missing")
+	}
+	for name, file := range map[string]runplan.StagedFile{"source": plan.IrisSuite.Source, "secret environment": plan.IrisSuite.SecretEnvironment} {
+		sum, _, err := artifact.HashFile(file.Path)
+		if err != nil || sum != file.SHA256 {
+			return a.fail(enc, fmt.Sprintf("iris %s does not match the sealed plan", name))
+		}
+	}
+	irisImage, err := immutableImage(plan.Images["iris"])
+	if err != nil {
+		return a.fail(enc, err.Error())
+	}
+	rabbitImage, err := immutableImage(plan.Images["rabbitmq"])
+	if err != nil {
+		return a.fail(enc, err.Error())
+	}
+	timeout := blockTimeout(plan)
+	if a.runTimeout > 0 {
+		timeout = a.runTimeout
+	}
+	cfg := fulliris.Config{
+		RunID: req.RunID, BlockID: block.ID, Workers: block.Workers, Repetitions: block.Repetitions,
+		CPUList: block.CPUList, CgroupMount: a.mount(), IrisImage: irisImage, RabbitMQImage: rabbitImage, JudgerDigest: plan.JudgerDigest,
+		SourcePath: plan.IrisSuite.Source.Path, SecretEnvPath: plan.IrisSuite.SecretEnvironment.Path,
+		RunDir: a.runDir(req.RunID), RuntimeDir: a.rtDir(req.RunID), S3Bucket: plan.IrisSuite.S3Bucket,
+		ProblemID: plan.IrisSuite.ProblemID, Language: plan.IrisSuite.Language, TimeLimitMS: plan.IrisSuite.TimeLimitMS,
+		MemoryLimitBytes: plan.IrisSuite.MemoryLimitBytes, TestcasesPerRequest: plan.IrisSuite.TestcasesPerRequest,
+		MessageIDStart: plan.IrisSuite.MessageIDStart, Timeout: timeout,
+	}
+	var result fulliris.Result
+	telemetryPath := filepath.Join(cfg.RunDir, "telemetry", "thermal-"+block.ID+".ndjson")
+	err = telemetry.Capture(telemetryPath, block.ID, a.telemetrySampler(), func() error {
+		var runErr error
+		result, runErr = fulliris.Run(ctx, cfg)
+		return runErr
+	})
+	if err != nil {
+		return a.fail(enc, err.Error())
+	}
+	for _, rel := range []string{filepath.ToSlash(filepath.Join("samples", block.ID+".ndjson")), filepath.ToSlash(filepath.Join("receipts", block.ID+".json")), filepath.ToSlash(filepath.Join("telemetry", "thermal-"+block.ID+".ndjson"))} {
+		sum, _, err := artifact.HashFile(filepath.Join(cfg.RunDir, filepath.FromSlash(rel)))
+		if err != nil {
+			return a.fail(enc, err.Error())
+		}
+		if err := enc.Emit(protocol.Event{Kind: protocol.KindArtifact, Path: rel, SHA256: sum}); err != nil {
+			return err
+		}
+	}
+	receipt, err := a.writeRecord(req.RunID, req.PlanSHA256, "run-block-"+block.ID, "external Iris block "+block.ID+" samples="+strconv.Itoa(result.Receipt.SampleCount))
+	if err != nil {
+		return a.fail(enc, err.Error())
+	}
+	return a.complete(enc, receipt)
+}
+
+func immutableImage(image runplan.Image) (string, error) {
+	if image.Reference == "" || !runplan.ValidImageDigest(image.Digest) {
+		return "", errors.New("iris suite image is not digest-pinned")
+	}
+	if strings.Contains(image.Reference, "@") {
+		parts := strings.SplitN(image.Reference, "@", 2)
+		if parts[1] != image.Digest {
+			return "", errors.New("iris suite image reference digest disagrees with plan")
+		}
+		return image.Reference, nil
+	}
+	return image.Reference + "@" + image.Digest, nil
 }
 
 // newBlockCoordinator wires the coordinator for one block. In OCI mode it
@@ -1154,7 +1227,13 @@ func (a *agent) validate(req protocol.Request, enc *protocol.EventEncoder) error
 		}
 	}
 	for _, block := range plan.Blocks {
-		if err := a.validateBlock(req.RunID, block, plan.WorkloadBinary.SHA256); err != nil {
+		var err error
+		if block.Suite == "iris" {
+			err = a.validateIrisBlock(req.RunID, plan, block)
+		} else {
+			err = a.validateBlock(req.RunID, block, plan.WorkloadBinary.SHA256)
+		}
+		if err != nil {
 			_ = enc.Emit(protocol.Event{Kind: protocol.KindCheck, Name: "block-" + block.ID, Status: protocol.StatusFailed, Message: sanitize(err.Error())})
 			return a.fail(enc, err.Error())
 		}
@@ -1167,6 +1246,26 @@ func (a *agent) validate(req protocol.Request, enc *protocol.EventEncoder) error
 		return a.fail(enc, err.Error())
 	}
 	return a.complete(enc, receipt)
+}
+
+func (a *agent) validateIrisBlock(runID string, plan runplan.Plan, block runplan.Block) error {
+	irisImage, err := immutableImage(plan.Images["iris"])
+	if err != nil {
+		return err
+	}
+	rabbitImage, err := immutableImage(plan.Images["rabbitmq"])
+	if err != nil {
+		return err
+	}
+	cfg := fulliris.Config{RunID: runID, BlockID: block.ID, Workers: block.Workers, Repetitions: block.Repetitions, CPUList: block.CPUList, CgroupMount: a.mount(), IrisImage: irisImage, RabbitMQImage: rabbitImage, JudgerDigest: plan.JudgerDigest, SourcePath: plan.IrisSuite.Source.Path, SecretEnvPath: plan.IrisSuite.SecretEnvironment.Path, RunDir: a.runDir(runID), RuntimeDir: a.rtDir(runID), S3Bucket: plan.IrisSuite.S3Bucket, ProblemID: plan.IrisSuite.ProblemID, Language: plan.IrisSuite.Language, TimeLimitMS: plan.IrisSuite.TimeLimitMS, MemoryLimitBytes: plan.IrisSuite.MemoryLimitBytes, TestcasesPerRequest: plan.IrisSuite.TestcasesPerRequest, MessageIDStart: plan.IrisSuite.MessageIDStart, Timeout: blockTimeout(plan)}
+	if err := fulliris.Validate(cfg.RunDir, cfg); err != nil {
+		return err
+	}
+	telemetryPath := filepath.Join(cfg.RunDir, "telemetry", "thermal-"+block.ID+".ndjson")
+	if _, _, err := telemetry.ValidateFile(telemetryPath, block.ID); err != nil {
+		return fmt.Errorf("block %s telemetry: %w", block.ID, err)
+	}
+	return nil
 }
 
 func (a *agent) validateBlock(runID string, block runplan.Block, workloadSHA string) error {
