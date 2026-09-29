@@ -11,7 +11,9 @@ discover="${repo_root}/scripts/aws/discover-rds-snapshot.sh"
 upload="${repo_root}/scripts/aws/upload-fixtures.sh"
 bootstrap="${repo_root}/scripts/aws/bootstrap-benchmark-db-role.sh"
 build_manifest="${repo_root}/scripts/aws/build-fixture-manifest.sh"
+build_runtime_env="${repo_root}/scripts/aws/build-iris-runtime-env.sh"
 fake_bin="${script_dir}/fake-aws"
+runtime_fake_bin="${script_dir}/fake-aws-runtime"
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "${tmp}"' EXIT
@@ -26,6 +28,8 @@ export IRIS_BENCHMARK_SOURCE_DB_IDENTIFIER="terraform-20250506182211604800000001
 source_identifier="${IRIS_BENCHMARK_SOURCE_DB_IDENTIFIER}"
 
 chmod +x "${fake_bin}/aws" 2>/dev/null || true
+chmod +x "${runtime_fake_bin}/aws" 2>/dev/null || true
+chmod +x "${build_runtime_env}" 2>/dev/null || true
 export PATH="${fake_bin}:${PATH}"
 
 failures=0
@@ -180,6 +184,70 @@ assert_eq "2" "$(count_log 'secretsmanager get-secret-value')" "bootstrap reads 
 assert_contains "\set ro_user 'benchmark_ro'" "$(cat "${FAKE_PSQL_STDIN_LOG}")" "bootstrap renders the role name"
 assert_contains "ALTER ROLE :\"ro_user\"" "$(cat "${FAKE_PSQL_STDIN_LOG}")" "bootstrap applies the SQL on stdin"
 assert_not_contains "testreadonlypassword123" "$(cat "${FAKE_PSQL_ARGS_LOG}")" "password is never passed as a psql argument"
+
+# --- External Iris runtime env ------------------------------------------------
+
+export IRIS_BENCHMARK_RDS_READONLY_SECRET_ID="codedang-iris-benchmark/readonly-db"
+export IRIS_BENCHMARK_S3_BUCKET="codedang-iris-benchmark-testcases"
+export IRIS_BENCHMARK_S3_READ_ROLE_ARN="arn:aws:iam::219857217698:role/codedang-iris-benchmark-testcase-read"
+cat >"${tmp}/runtime-ro.json" <<'JSON'
+{"username":"bench user","password":"p@ss:/?#[]","host":"codedang-iris-benchmark.abc123.ap-northeast-2.rds.amazonaws.com","port":5433,"dbname":"codedang db"}
+JSON
+export FAKE_RO_SECRET_FILE="${tmp}/runtime-ro.json"
+saved_path="${PATH}"
+export PATH="${runtime_fake_bin}:${PATH}"
+
+: >"${FAKE_AWS_LOG}"
+dry_out="$(${build_runtime_env} --out "${tmp}/dry.env" --dry-run 2>&1)"
+assert_eq "0" "$?" "runtime env dry-run succeeds"
+assert_contains "no AWS calls" "${dry_out}" "runtime env dry-run is sanitized"
+assert_eq "0" "$(count_log .)" "runtime env dry-run makes no AWS calls"
+[ ! -e "${tmp}/dry.env" ] && pass "runtime env dry-run writes no file" || fail "runtime env dry-run wrote a file"
+
+saved_secret_id="${IRIS_BENCHMARK_RDS_READONLY_SECRET_ID}"
+export IRIS_BENCHMARK_RDS_READONLY_SECRET_ID="arn:aws:secretsmanager:ap-northeast-2:219857217698:secret:codedang-iris-benchmark/readonly-db-example"
+if "${build_runtime_env}" --out "${tmp}/arn-dry.env" --dry-run >/dev/null 2>&1; then
+  pass "runtime env accepts the benchmark secret ARN form"
+else
+  fail "runtime env rejected the benchmark secret ARN form"
+fi
+export IRIS_BENCHMARK_RDS_READONLY_SECRET_ID="${saved_secret_id}"
+
+export IRIS_BENCHMARK_RDS_READONLY_SECRET_ID="prod/readonly-db"
+invalid_out="$(${build_runtime_env} --out "${tmp}/invalid.env" --yes 2>&1 || true)"
+export IRIS_BENCHMARK_RDS_READONLY_SECRET_ID="${saved_secret_id}"
+assert_not_contains "p@ss:/?#[]" "${invalid_out}" "runtime env refusal does not leak credentials"
+
+saved_host_file="${FAKE_RO_SECRET_FILE}"
+cat >"${tmp}/runtime-prod-host.json" <<'JSON'
+{"username":"bench user","password":"p@ss:/?#[]","host":"prod.example.com","port":5433,"dbname":"codedang db"}
+JSON
+export FAKE_RO_SECRET_FILE="${tmp}/runtime-prod-host.json"
+assert_failure "runtime env refuses a non-benchmark database host" "${build_runtime_env}" --out "${tmp}/host.env" --yes
+export FAKE_RO_SECRET_FILE="${saved_host_file}"
+
+saved_role_arn="${IRIS_BENCHMARK_S3_READ_ROLE_ARN}"
+export IRIS_BENCHMARK_S3_READ_ROLE_ARN="arn:aws:iam::219857217698:role/production-read"
+assert_failure "runtime env refuses a non-benchmark role ARN" "${build_runtime_env}" --out "${tmp}/role.env" --yes
+export IRIS_BENCHMARK_S3_READ_ROLE_ARN="${saved_role_arn}"
+
+saved_bucket="${IRIS_BENCHMARK_S3_BUCKET}"
+export IRIS_BENCHMARK_S3_BUCKET="production-testcases"
+assert_failure "runtime env refuses a non-benchmark bucket" "${build_runtime_env}" --out "${tmp}/bucket.env" --yes
+export IRIS_BENCHMARK_S3_BUCKET="${saved_bucket}"
+
+out_env="${tmp}/runtime.env"
+: >"${FAKE_AWS_LOG}"
+runtime_out="$(${build_runtime_env} --out "${out_env}" --yes 2>&1)"
+assert_eq "0" "$?" "runtime env build succeeds"
+assert_not_contains "FAKE_SECRET_KEY" "${runtime_out}" "runtime env build does not print credentials"
+assert_eq "2" "$(count_log .)" "runtime env reads the secret and assumes the read role"
+assert_contains 'DATABASE_URL=postgresql://bench%20user:p%40ss%3A%2F%3F%23%5B%5D@codedang-iris-benchmark.abc123.ap-northeast-2.rds.amazonaws.com:5433/codedang%20db?sslmode=require' "$(cat "${out_env}")" "runtime env URL-encodes database credentials"
+assert_contains 'AWS_ACCESS_KEY_ID=FAKE_ACCESS_KEY' "$(cat "${out_env}")" "runtime env includes access key"
+assert_contains 'AWS_SECRET_ACCESS_KEY=FAKE_SECRET_KEY' "$(cat "${out_env}")" "runtime env includes secret key"
+assert_contains 'AWS_SESSION_TOKEN=FAKE_SESSION_TOKEN' "$(cat "${out_env}")" "runtime env includes session token"
+assert_eq "600" "$(stat -c '%a' "${out_env}")" "runtime env is mode 0600"
+export PATH="${saved_path}"
 
 # --- Problem fixture export --------------------------------------------------
 if ! "${script_dir}/export-problem-fixtures.test.sh"; then

@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "toolVersion": "0.1.0",
+  "iris": {
+    "image": "ghcr.io/skkuding/codedang-iris:production",
+    "rabbitmqImage": "rabbitmq:3.13-management-alpine"
+  },
+  "profiles": {
+    "external-1": {
+      "suite": "iris",
+      "workers": 1,
+      "repetitions": 50,
+      "cpuList": "2"
+    },
+    "external-2": {
+      "suite": "iris",
+      "workers": 2,
+      "repetitions": 50,
+      "cpuList": "2-3"
+    },
+    "external-4": {
+      "suite": "iris",
+      "workers": 4,
+      "repetitions": 50,
+      "cpuList": "2-5"
+    },
+    "external-8": {
+      "suite": "iris",
+      "workers": 8,
+      "repetitions": 50,
+      "cpuList": "2-9"
+    },
+    "external-16": {
+      "suite": "iris",
+      "workers": 16,
+      "repetitions": 50,
+      "cpuList": "2-17"
+    },
+    "external-30": {
+      "suite": "iris",
+      "workers": 30,
+      "repetitions": 50,
+      "cpuList": "2-31"
+    }
+  },
+  "hosts": [
+    {
+      "alias": "codedang8",
+      "hostIdentity": "skkuding-4f-4",
+      "allow": true
+    }
+  ],
+  "paths": {
+    "socketDir": "~/.ssh/sockets",
+    "resultRoot": "runs"
+  },
+  "limits": {
+    "maxWorkers": 32,
+    "maxRunSeconds": 600,
+    "maxLoad1": 1.0,
+    "maxQueueDepth": 100000,
+    "maxDiskMiB": 40960
+  }
+}

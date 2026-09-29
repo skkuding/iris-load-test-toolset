@@ -39,11 +39,12 @@ type Metric struct {
 // the whole file. A file without timestamps keeps the pre-window behavior and
 // reports a zero window.
 type Summary struct {
-	Count      int    `json:"count"`
-	Failures   int    `json:"failures"`
-	Successful int    `json:"successful"`
-	CPUTimeMs  Metric `json:"cpuTimeMs"`
-	RealTimeMs Metric `json:"realTimeMs"`
+	Count      int     `json:"count"`
+	Failures   int     `json:"failures"`
+	Successful int     `json:"successful"`
+	CPUTimeMs  Metric  `json:"cpuTimeMs"`
+	RealTimeMs Metric  `json:"realTimeMs"`
+	EndToEndMs *Metric `json:"endToEndMs,omitempty"`
 	// SteadyWindow* describe the all-workers-active interval, when present.
 	SteadyWindowApplied bool    `json:"steadyWindowApplied"`
 	SteadyWindowStartNs int64   `json:"steadyWindowStartNs"`
@@ -58,6 +59,7 @@ type sample struct {
 	Worker      string   `json:"worker"`
 	StartedAtNs *int64   `json:"startedAtNs"`
 	EndedAtNs   *int64   `json:"endedAtNs"`
+	EndToEndMs  *float64 `json:"endToEndMs"`
 }
 
 // successSample is a validated successful measurement plus the fields needed to
@@ -68,6 +70,7 @@ type successSample struct {
 	startedAtNs int64
 	endedAtNs   int64
 	timestamped bool
+	endToEnd    *float64
 }
 
 // NDJSON parses direct Judger samples and returns their timing summary.
@@ -97,6 +100,13 @@ func NDJSON(r io.Reader) (Summary, error) {
 			return Summary{}, fmt.Errorf("samples line %d: successful sample has an invalid timing value", line)
 		}
 		ss := successSample{cpu: *s.CPUTimeMs, real: *s.RealTimeMs, worker: s.Worker}
+		if s.EndToEndMs != nil {
+			if !validMeasurement(*s.EndToEndMs) {
+				return Summary{}, fmt.Errorf("samples line %d: successful sample has an invalid endToEndMs value", line)
+			}
+			value := *s.EndToEndMs
+			ss.endToEnd = &value
+		}
 		if s.StartedAtNs != nil && s.EndedAtNs != nil &&
 			*s.StartedAtNs > 0 && *s.EndedAtNs > 0 && *s.EndedAtNs >= *s.StartedAtNs {
 			ss.startedAtNs = *s.StartedAtNs
@@ -139,6 +149,16 @@ func NDJSON(r io.Reader) (Summary, error) {
 	}
 	summary.CPUTimeMs = summarize(cpu)
 	summary.RealTimeMs = summarize(real)
+	endToEnd := make([]float64, 0, len(successes))
+	for _, ss := range successes {
+		if ss.endToEnd != nil {
+			endToEnd = append(endToEnd, *ss.endToEnd)
+		}
+	}
+	if len(endToEnd) == len(successes) {
+		metric := summarize(endToEnd)
+		summary.EndToEndMs = &metric
+	}
 	return summary, nil
 }
 

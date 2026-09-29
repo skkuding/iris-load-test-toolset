@@ -216,7 +216,7 @@ func TestExecuteRunRunsEveryBlockBeforeValidation(t *testing.T) {
 	}
 }
 
-func TestExecuteRunRejectsIrisSuiteBeforeBlocks(t *testing.T) {
+func TestExecuteRunDispatchesIrisSuite(t *testing.T) {
 	plan, sha := controllerPlan(t)
 	plan.Blocks[0].Suite = "iris"
 	inv := &fakeInvoker{}
@@ -227,14 +227,12 @@ func TestExecuteRunRejectsIrisSuiteBeforeBlocks(t *testing.T) {
 		ssh:        &fakeUploader{},
 		newInvoker: func([]string) agentInvoker { return inv },
 	}
-	err := executeRun(context.Background(), rc)
-	if err == nil || !strings.Contains(err.Error(), "not supported") {
-		t.Fatalf("err = %v, want unsupported suite", err)
+	if err := executeRun(context.Background(), rc); err != nil {
+		t.Fatal(err)
 	}
-	for _, a := range inv.snapshot() {
-		if a == protocol.ActionValidate || a == protocol.ActionBundle || a == protocol.ActionCleanup {
-			t.Fatalf("post-success action %s ran for an unsupported suite", a)
-		}
+	want := []protocol.Action{protocol.ActionInspect, protocol.ActionPrepare, protocol.ActionRunBlock, protocol.ActionValidate, protocol.ActionCleanup, protocol.ActionBundle}
+	if got := inv.snapshot(); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("action order = %v, want %v", got, want)
 	}
 }
 

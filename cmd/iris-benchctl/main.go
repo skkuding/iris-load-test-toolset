@@ -1,8 +1,7 @@
 // Command iris-benchctl is the operator-facing controller. Each subcommand is
 // intentionally thin: it loads configuration, builds an immutable run plan,
-// and delegates to the orchestrator or transport. Provision and full suite
-// execution are not implemented in the minimum viable core and say so
-// explicitly.
+// and delegates to the orchestrator or transport. Provisioning remains an
+// explicit external Ansible operation.
 package main
 
 import (
@@ -56,7 +55,7 @@ Usage:
   iris-benchctl status  --config FILE --run RUNID [--host ALIAS]
   iris-benchctl analyze --run RUN_DIRECTORY
 
-Implemented: plan, run (partial), collect, status, analyze (direct suite).
+Implemented: plan, run, collect, status, analyze (direct and external-Iris suites).
 Not implemented in this build: provision, qualify, resume.
 `)
 }

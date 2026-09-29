@@ -5,7 +5,8 @@ reported by Iris and Judger. Start with `docs/WAVE1-REPLICATION.md` for the
 operator procedure. The private benchmark plan and progress log are maintained
 outside this repository.
 
-This repository currently implements the **direct Judger foundation**:
+This repository implements the direct Judger foundation and an external-data
+full-Iris suite:
 
 - a read-only host qualifier and an idempotent Ansible benchmark-host role;
 - live, isolated AWS benchmark resources (`codedang-iris-benchmark` RDS clone,
@@ -13,9 +14,11 @@ This repository currently implements the **direct Judger foundation**:
 - an immutable, digest-pinned run plan (`internal/runplan`);
 - a controller, `iris-benchctl`, and a host agent, `iris-bench-agent`;
 - a checksum-pinned direct runner, `judger-bench`, and its image.
+- digest-pinned local RabbitMQ plus production Iris containers, queue-prefilled
+  synchronized startup, benchmark RDS/S3 reads, and AMQP message conservation.
 
-The full-Iris/AMQP suite, topology auto-assignment, and privileged real-host validation are **not** implemented in
-this build. See [Not supported in this build](#not-supported-in-this-build).
+See [Full Iris external-data benchmark](docs/FULL-IRIS-EXTERNAL.md) for the
+operator procedure and validated runs.
 
 ## Safety boundary
 
@@ -36,21 +39,26 @@ cmd/iris-benchctl/          controller CLI (plan, run, collect, status, analyze)
 cmd/iris-bench-agent/       host agent and worker-exec wrapper
 cmd/judger-bench/           direct compile/execute loop and NDJSON samples
 internal/                   config, runplan, orchestrator, protocol, transport,
-                            containment, experiment, artifact, manifest,
-                            analyze, telemetry, qualification
+                            containment, experiment, fulliris, artifact,
+                            manifest, analyze, telemetry, qualification
 analysis/plot-run.py        uv-runnable plot of a collected direct run
+analysis/plot-ladder.py     concurrency ladder boxplot
+analysis/plot-repetition.py repeated-round aggregate and drift chart
 config/
   compatibility.yaml        host compatibility envelope (single source of truth)
-  profiles.json             example controller config with profiles
+  profiles.json             example direct-suite controller config
   run.example.json          minimal example controller config for `run`
+  full-iris-external.json   external-data full-Iris ladder profiles
 ansible/                    inventory, playbooks, iris_benchmark_host role
 images/judger-bench.Dockerfile
 fixtures/                   sanitized 568/569/570 testcases, metadata, manifest
+fixtures/iris-external-568/ curated external-data full-Iris source fixture
 .env.example                live benchmark names/ARNs (no secret values)
 scripts/qualify-host.sh     read-only Ansible qualification wrapper
 scripts/aws/                snapshot discovery, DB role, export, manifest,
-                            upload, container psql
+                            upload, runtime env, container psql
 infra/aws/iris-benchmark/   dedicated Terraform module and tests
+docs/FULL-IRIS-EXTERNAL.md  external-data full-Iris operator guide
 ```
 
 `runs/` and `bin/` are git-ignored. Generated results stay outside Git.
@@ -97,10 +105,10 @@ iris-benchctl analyze --run RUN_DIRECTORY
 | Command | State | Behavior |
 | --- | --- | --- |
 | `plan` | Implemented | Resolves and prints the immutable run plan JSON (stdout) and its SHA-256 (stderr). No mutation. |
-| `run` | Implemented | Stages sealed direct-suite assets, then runs `inspect` -> `prepare`/qualification -> every `run-block` -> `validate` -> `cleanup` -> `bundle`. Does not `collect` (run `collect` afterward). |
+| `run` | Implemented | Stages sealed direct or external-Iris assets, then runs `inspect` -> `prepare`/qualification -> every `run-block` -> `validate` -> `cleanup` -> `bundle`. Does not `collect` (run `collect` afterward). |
 | `collect` | Implemented | Downloads and hash-verifies a bundle inventory, requires qualification/validation/cleanup evidence, secret-scans it, and writes `manifest.json`, `checksums.sha256`, `collection.json`, and `COMPLETE`. |
 | `status` | Implemented | Prints local persisted state, or queries the remote agent with `--host`. |
-| `analyze` | Implemented (direct suite) | Aggregates collected `samples/*.ndjson` in lexical order and prints timing statistics plus a telemetry-backed comparability decision as JSON. |
+| `analyze` | Implemented | Aggregates collected `samples/*.ndjson` and reports execution timing, optional full-Iris end-to-end latency, and telemetry-backed comparability. |
 | `provision`, `qualify`, `resume` | Not implemented | Print `not implemented in the minimum viable core` and exit non-zero. |
 
 `plan` and `run` share the plan flags:
@@ -112,7 +120,8 @@ iris-benchctl analyze --run RUN_DIRECTORY
 -suite judger|iris      override the profile suite
 -run-id ID              explicit run id (default: generated iris-YYYYMMDD-xxxxxxxx)
 -iris-digest DIGEST     resolved Iris manifest digest (sha256:<64 hex>)
--resolve-image          resolve the configured Iris tag with docker buildx imagetools
+-rabbitmq-digest DIGEST resolved RabbitMQ manifest digest (Iris suite only)
+-resolve-image          resolve the configured Iris and RabbitMQ tags with docker buildx imagetools
 -judger-digest DIGEST   Judger artifact SHA-256 (raw hex or sha256:...)
 -judger-digest-file F   use the SHA-256 of file F as the Judger digest
 -benchmark-image ID     immutable local Docker image ID (exactly sha256:<64hex>)
@@ -126,8 +135,28 @@ iris-benchctl analyze --run RUN_DIRECTORY
                         uncontained, non-comparable population
 ```
 
+The `iris` suite additionally accepts:
+
+```text
+-iris-source PATH       curated source file (hashed and staged)
+-iris-env-file PATH     mode-0600 runtime credential env file (hashed and staged)
+-problem-id N           Iris problem id
+-language NAME          Iris language (default Cpp)
+-time-limit-ms N        Iris time limit in milliseconds
+-memory-limit-bytes N   Iris memory limit in bytes
+-testcases-per-request N
+                        embedded/external testcases per request (external-data uses 1)
+-message-id-start N     first numeric AMQP message id
+-rds-generation NAME    sealed benchmark RDS generation label
+-s3-object-set DIGEST   sealed S3 object-set digest label
+-s3-bucket NAME         testcase bucket name
+```
+
 `run` additionally accepts the direct-suite flags listed in the `run` section
-below (`--cgroup-parent`, `--bench-binary`, `--judger`, and others).
+below (`--cgroup-parent`, `--bench-binary`, `--judger`, and others). The Iris
+suite needs none of them: it rejects direct fixtures and workload flags and
+requires `--production-compat`. See
+[Full Iris external-data benchmark](docs/FULL-IRIS-EXTERNAL.md).
 
 ### plan
 
@@ -142,9 +171,11 @@ go run ./cmd/iris-benchctl plan \
   --bench-binary-sha256 <workload-sha256>
 ```
 
-The plan refuses to seal without a resolved Iris digest, a Judger digest, and a
-precompiled workload path and SHA-256 (`ValidateRunnable`). The same inputs
-always produce the same plan digest.
+For the direct suite, the plan refuses to seal without a resolved Iris digest, a
+Judger digest, and a precompiled workload path and SHA-256. The `iris` suite
+requires a resolved Iris and RabbitMQ digest, the sealed source and credential
+env files, and the sealed RDS/S3 labels instead of a workload; it requires no
+direct fixture. The same inputs always produce the same plan digest.
 
 ### run
 
@@ -178,7 +209,8 @@ agent upload is re-hashed remotely before its first execution, and the private
 staging directory is removed after every success or failure path. The agent
 requires its compiled version to equal the plan tool version and verifies the
 sealed workload SHA-256 immediately before execution. Arbitrary source is never
-compiled. Without `--cgroup-parent`, `run-block` remains unsupported.
+compiled. For the direct suite, `run-block` remains unsupported without
+`--cgroup-parent`.
 
 Direct runs require exactly one `--fixture name=input` and matching
 `--expected-output name=output`. Both files are hashed into the sealed plan and
@@ -205,8 +237,9 @@ uses an argv-only `docker run --rm` invocation with a unique run-scoped name,
 privileged host cgroup namespace access, its assigned CPU/NUMA set, and
 same-path mounts for cgroup v2, the sealed workload/fixtures, and output.
 
-`--production-compat` requires this OCI mode; unprivileged host execution cannot
-claim to reproduce the production root-cgroup behavior. The live alpha.4 Judger
+`--production-compat` requires this OCI mode for the direct suite (the `iris`
+suite instead runs the pinned Iris and RabbitMQ containers); unprivileged host
+execution cannot claim to reproduce the production root-cgroup behavior. The live alpha.4 Judger
 reports `cgroup_path` as a full filesystem path such as
 `/sys/fs/cgroup/sandbox-<CONTAINER_ID>/box-*`, while the monitor holds the
 mount-relative root `/sandbox-<CONTAINER_ID>`; both forms are normalized and
@@ -351,24 +384,46 @@ uv run analysis/plot-ladder.py \
   --out wave1-direct-sweep.png
 ```
 
-`plot-ladder.py` builds a three-panel boxplot (CPU time, real time, memory) by
-concurrency level, matching the layout of the Wave 1 report. Each `--run` pairs
-a label with a collected bundle; labels become the x-axis categories in the
-given order. `config/wave1-sweep.json` provides `ladder-1` … `ladder-30`
-profiles for such a sweep. [Wave 1 comparison](docs/WAVE1-COMPARISON.md) records
-the original reference values and the matched reproduction.
+`plot-ladder.py` builds a boxplot of CPU time, real time, and memory by
+concurrency level, matching the layout of the Wave 1 report. When the samples
+carry `endToEndMs` (full-Iris bundles), an end-to-end panel is added. Each
+`--run` pairs a label with a collected bundle; labels become the x-axis
+categories in the given order, and `--xlabel` overrides the axis label.
+`config/wave1-sweep.json` provides `ladder-1` … `ladder-30` profiles for a
+direct sweep. [Wave 1 comparison](docs/WAVE1-COMPARISON.md) records the original
+reference values and the matched reproduction.
+
+### plot-repetition
+
+```bash
+uv run analysis/plot-repetition.py \
+  --run 1:1=runs/r1-1x --run 1:8=runs/r1-8x --run 1:30=runs/r1-30x \
+  --run 2:1=runs/r2-1x --run 2:8=runs/r2-8x --run 2:30=runs/r2-30x \
+  --out-aggregate runs-aggregate.png --out-drift runs-drift.png
+```
+
+`plot-repetition.py` aggregates repeated rounds. Each `--run ROUND:LABEL=DIR`
+maps a collected bundle to a round number and a label (typically a replica
+count). It writes a pooled boxplot across rounds and a per-round median drift
+chart, and prints a drift table with per-level median, min, max, and spread.
+The external-data full-Iris ladder and reboot repetition are described in
+[Full Iris external-data benchmark](docs/FULL-IRIS-EXTERNAL.md).
 
 ## Configuration
 
 The controller accepts one strict JSON file via `--config`. Unknown fields are
 rejected. Defaults are applied before validation and never override explicit
-values. Example files: `config/profiles.json` and `config/run.example.json`.
+values. Example files: `config/profiles.json`, `config/run.example.json`, and
+`config/full-iris-external.json` (the external-data full-Iris ladder).
 
 ```jsonc
 {
   "schemaVersion": 1,
   "toolVersion": "0.1.0",
-  "iris":  { "image": "ghcr.io/skkuding/codedang-iris:stage" },
+  "iris":  {
+    "image": "ghcr.io/skkuding/codedang-iris:stage",
+    "rabbitmqImage": "rabbitmq:3.13-management-alpine"  // required for suite: iris
+  },
   "profiles": {
     "isolated-1s": {
       "suite": "judger",       // judger | iris
@@ -403,9 +458,9 @@ At least one host must have `"allow": true`, and the `--host` alias must match.
 `limits.maxLoad1` defaults to the conservative value `1.0`, must be positive,
 and is sealed into `qualification.maxLoad1`; prepare rejects a missing,
 malformed, or higher one-minute host load.
-Note: the config accepts `suite: "iris"` and a `turbo` value, but the agent
-refuses a non-`judger` block, and `turbo` is validated then dropped from
-the plan (turbo is controlled by the Ansible host role, not the controller).
+The `iris` suite is the external-data mode documented in
+`docs/FULL-IRIS-EXTERNAL.md`. `turbo` is validated then dropped from the plan
+(turbo is controlled by the Ansible host role, not the controller).
 `numaPolicy` is carried in the plan but the agent currently assigns one
 `cpuset.mems` value to every worker (`--cpuset-mems`, default `0`); per-worker
 NUMA policy is not applied yet. `cpuList` is split round-robin across workers
@@ -418,10 +473,13 @@ The default Iris selector is the mutable tag
 is resolved to an immutable manifest digest:
 
 - `--iris-digest sha256:<64 hex>` supplies an operator-resolved digest.
+- `--rabbitmq-digest sha256:<64 hex>` supplies the RabbitMQ manifest digest for
+  `suite: iris`; a runnable Iris plan requires both digests.
 - `--resolve-image` runs
   `docker buildx imagetools inspect --format '{{.Manifest.Digest}}' <reference>`
-  and uses the result. If the reference already contains `@sha256:...`, that
-  digest is used unchanged.
+  for the Iris reference and, for `suite: iris`, the RabbitMQ reference, and
+  uses the results. If a reference already contains `@sha256:...`, that digest
+  is used unchanged.
 - `.env.example` records `IRIS_BENCHMARK_IRIS_IMAGE_DIGEST` as a **cache only**.
   The controller never reads `.env`; re-resolve before each run.
 
@@ -779,12 +837,9 @@ the scoped agent.
 ## Not supported in this build
 
 - `iris-benchctl provision`, `qualify`, and `resume`.
-- The full-Iris suite and AMQP. There is no `internal/amqp` package, no
-  RabbitMQ lifecycle, no publisher/collector, and no message-conservation
-  validation. The agent refuses any block whose suite is not `judger`.
-  `iris.rabbitmqImage` is carried into a plan when configured but is unused.
-- RDS- and S3-backed judge data paths in the runner. The AWS workflow prepares
-  the database and fixtures, but the agent does not read from them.
+- Embedded-testcase full-Iris modes and the client-api HTTP submission path.
+- Production RabbitMQ TLS/operator clustering; the benchmark broker is a
+  digest-pinned, run-local single node on an isolated vhost.
 - Topology-aware CPU/NUMA auto-assignment. `cpuList` is operator-supplied and
   `numaPolicy` is recorded but not enforced.
 - Privileged real-host validation in tests/CI; only fake-filesystem unit tests

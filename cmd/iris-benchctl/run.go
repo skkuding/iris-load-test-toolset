@@ -140,14 +140,13 @@ func cmdRun(args []string) error {
 	if *dryRun {
 		return nil
 	}
-	if plan.Suite != "judger" {
-		return fmt.Errorf("suite %q is not supported in this build; only the direct judger suite is implemented", plan.Suite)
-	}
-	direct.benchBinary = plan.WorkloadBinary.Path
-	direct.benchmarkImage = o.benchmarkImage
-	if *localJudger != "" {
-		direct.judgerPath = stagedPath(plan.RunID, "judger")
-		direct.judgerSHA256 = strings.TrimPrefix(plan.JudgerDigest, "sha256:")
+	if plan.Suite == "judger" {
+		direct.benchBinary = plan.WorkloadBinary.Path
+		direct.benchmarkImage = o.benchmarkImage
+		if *localJudger != "" {
+			direct.judgerPath = stagedPath(plan.RunID, "judger")
+			direct.judgerSHA256 = strings.TrimPrefix(plan.JudgerDigest, "sha256:")
+		}
 	}
 
 	ssh := makeSSH(cfg, o.host, o.sshControlPath)
@@ -226,9 +225,6 @@ func runOperations(ctx context.Context, orch *orchestrator.Orchestrator, invoker
 		return fmt.Errorf("prepare: %w", err)
 	}
 	for _, block := range rc.plan.Blocks {
-		if block.Suite != "judger" {
-			return fmt.Errorf("run-block %s: suite %q is not supported in this build", block.ID, block.Suite)
-		}
 		if err := invokeOp(ctx, orch, invoker, rc.plan.RunID, rc.planSHA256, protocol.ActionRunBlock, block.ID); err != nil {
 			return fmt.Errorf("run-block %s: %w", block.ID, err)
 		}
@@ -307,6 +303,12 @@ func runAssets(o planOptions, plan runplan.Plan, localAgent, localJudger string)
 	}
 	if o.localBenchBinary != "" {
 		assets = append(assets, stagedAsset{localPath: o.localBenchBinary, remotePath: plan.WorkloadBinary.Path})
+	}
+	if plan.IrisSuite != nil {
+		assets = append(assets,
+			stagedAsset{localPath: o.irisSource, remotePath: plan.IrisSuite.Source.Path, verifySHA: plan.IrisSuite.Source.SHA256},
+			stagedAsset{localPath: o.irisEnvFile, remotePath: plan.IrisSuite.SecretEnvironment.Path, verifySHA: plan.IrisSuite.SecretEnvironment.SHA256},
+		)
 	}
 	if o.qualificationReport != "" {
 		assets = append(assets, stagedAsset{localPath: o.qualificationReport, remotePath: plan.Qualification.Report.Path})

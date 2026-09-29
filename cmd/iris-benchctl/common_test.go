@@ -167,6 +167,49 @@ func TestBuildPlanBadFixtureSpec(t *testing.T) {
 	}
 }
 
+func TestBuildExternalIrisPlan(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "source.cpp")
+	env := filepath.Join(dir, "iris.env")
+	if err := os.WriteFile(source, []byte("int main(){}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(env, []byte("SECRET=value\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := testConfig(t)
+	cfg.Profiles["external-1"] = config.Profile{Suite: "iris", Workers: 1, Repetitions: 5, CPUList: "2"}
+	o := baseOptions()
+	o.profile = "external-1"
+	o.productionCompat = true
+	o.fixtures = nil
+	o.expectedOutputs = nil
+	o.benchBinary = ""
+	o.benchBinarySHA = ""
+	o.irisSource = source
+	o.irisEnvFile = env
+	o.rabbitmqDigest = "sha256:" + strings.Repeat("e", 64)
+	o.problemID = 15850
+	o.language = "Cpp"
+	o.timeLimitMS = 1000
+	o.memoryLimitBytes = 1024
+	o.testcasesPerRequest = 1
+	o.messageIDStart = 2000001
+	o.rdsGeneration = "rds-1"
+	o.s3ObjectSet = "objects-1"
+	o.s3Bucket = "bucket"
+	plan, _, err := o.buildPlan(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.IrisSuite == nil || len(plan.Fixtures) != 0 || plan.WorkloadBinary.Path != "" {
+		t.Fatalf("iris plan = %+v", plan)
+	}
+	if plan.Images["rabbitmq"].Digest != o.rabbitmqDigest {
+		t.Fatalf("rabbitmq image = %+v", plan.Images["rabbitmq"])
+	}
+}
+
 func TestNewOpID(t *testing.T) {
 	a, err := newOpID()
 	if err != nil {

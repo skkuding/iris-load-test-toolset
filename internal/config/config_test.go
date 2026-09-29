@@ -121,3 +121,14 @@ func TestValidateFixtureSet(t *testing.T) {
 		t.Fatal("ValidateFixtureSet accepted a traversal path")
 	}
 }
+
+func TestDecodeRabbitMQImage(t *testing.T) {
+	doc := strings.Replace(minimal, `"iris": {"image": "ghcr.io/skkuding/codedang-iris:stage"}`, `"iris": {"image": "ghcr.io/skkuding/codedang-iris:stage", "rabbitmqImage": "rabbitmq:3.13-management-alpine"}`, 1)
+	cfg, err := Decode([]byte(doc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Iris.RabbitMQImage != "rabbitmq:3.13-management-alpine" {
+		t.Fatalf("rabbitmq image = %q", cfg.Iris.RabbitMQImage)
+	}
+}

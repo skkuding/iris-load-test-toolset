@@ -111,6 +111,30 @@ func TestProductionCompatRequiresSealedLocalBenchmarkImage(t *testing.T) {
 	}
 }
 
+func TestIrisExternalDataPlan(t *testing.T) {
+	in := validInput()
+	in.Suite = "iris"
+	in.Fixtures = nil
+	in.WorkloadBinary = StagedFile{}
+	in.ContainmentMode = ContainmentProductionCompat
+	in.Images = map[string]Image{
+		"iris":     {Reference: DefaultIrisImage, Digest: "sha256:" + strings.Repeat("b", 64)},
+		"rabbitmq": {Reference: "rabbitmq:3.13-management-alpine", Digest: "sha256:" + strings.Repeat("f", 64)},
+	}
+	in.RDSGeneration = "rds-1"
+	in.S3ObjectSet = "objects-1"
+	in.Blocks[0].Suite = "iris"
+	in.IrisSuite = &IrisSuite{
+		Mode: "external-data", Source: StagedFile{Path: "/tmp/source", SHA256: strings.Repeat("a", 64)},
+		SecretEnvironment: StagedFile{Path: "/tmp/env", SHA256: strings.Repeat("d", 64)},
+		ProblemID:         1, Language: "Cpp", TimeLimitMS: 1000, MemoryLimitBytes: 1024,
+		TestcasesPerRequest: 1, MessageIDStart: 2000001, S3Bucket: "bucket",
+	}
+	if _, err := Build(in); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestBuildRejectsInvalidQualificationLoad(t *testing.T) {
 	in := validInput()
 	in.Qualification.MaxLoad1 = 0
