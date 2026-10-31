@@ -9,3 +9,8 @@ ansible/.ansible/
 __pycache__/
 *.py[cod]
 .venv/
+
+# Binaries built in the repository root by scripts/run-rdt-judger-ladder.sh
+/iris-benchctl
+/iris-bench-agent-linux-amd64
+/iris-bench-rdt-linux-amd64
