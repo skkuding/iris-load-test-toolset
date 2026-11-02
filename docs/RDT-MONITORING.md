@@ -1,4 +1,4 @@
-# Passive CMT and MBM measurement
+# Passive CMT and MBM measurement (RDT)
 
 `cmd/iris-bench-rdt` samples Intel resctrl `L3_MON` counters once per second. It reads LLC occupancy and total/local memory bandwidth for each LLC domain. It does not configure CAT, MBA, or CDP. It refuses to run when another resctrl control or monitoring group exists, since the default-group readings would then be incomplete.
 
@@ -6,6 +6,6 @@ The sampler runs in a privileged, network-disabled container and writes NDJSON p
 
 The 2026-10-31 reproduction is captured in `scripts/run-rdt-judger-ladder.sh`. It is an experiment record with explicit host, image, workload, and digest values; review these before reusing it. Its outputs are under `runs/iris-20261031-rdt-*` and `runs/rdt-20261031`. `runs/` is ignored by Git.
 
-Before running that script, build `iris-benchctl` for the local machine and static Linux/amd64 `iris-bench-agent-linux-amd64` and `iris-bench-rdt-linux-amd64` from this branch. Stage the sampler as `/tmp/iris-rdt-20261031/iris-bench-rdt-linux-amd64` on `codedang8`, and stage the pinned workload binary as `/tmp/iris-rdt-20261031/workload`. Verify the workload SHA-256 and the image/digest constants in the script. The script assumes the SSH alias `codedang8`, Docker access on that host, resctrl CMT/MBM support, and a writable delegated cgroup parent. It temporarily enables `cpuset` delegation if needed and restores the prior setting on exit. Run `bash scripts/run-rdt-judger-ladder.sh` from the repository root once those inputs are in place.
+Before running that script, build `iris-benchctl` for the local machine and static Linux/amd64 `iris-bench-agent-linux-amd64` and `iris-bench-rdt-linux-amd64` from this repository. Stage the sampler as `/tmp/iris-rdt-20261031/iris-bench-rdt-linux-amd64` on `codedang8`, and stage the pinned workload binary as `/tmp/iris-rdt-20261031/workload`. Verify the workload SHA-256 and the image/digest constants in the script. The script assumes the SSH alias `codedang8`, Docker access on that host, resctrl CMT/MBM support, and a writable delegated cgroup parent. It temporarily enables `cpuset` delegation if needed and restores the prior setting on exit. Run `bash scripts/run-rdt-judger-ladder.sh` from the repository root once those inputs are in place.
 
 These CMT/MBM readings are for all tasks in the host's resctrl default group. They cannot establish Judger-only LLC occupancy or bandwidth. MBA and CDP are allocation controls, so there is no passive MBA/CDP metric in this run. The production-compat run manifests are marked `comparable=false` because no qualification report was supplied; compare ladder stages only within this experiment and do not treat the figures as a qualified production baseline.

@@ -16,7 +16,8 @@ progress log are maintained separately and are **not** part of this repository.
 
 What is inside this repository:
 
-- `README.md` — toolset overview, commands, and AWS setup.
+- `README.md` — short Korean overview; `docs/README.md` — documentation index.
+- `docs/reference/TOOLSET-REFERENCE.md` — commands, configuration, and AWS setup.
 - `docs/WAVE1-REPLICATION.md` — this manual.
 - `config/profiles.json`, `config/run.example.json` — controller configuration.
 - `fixtures/` — sanitized testcases, metadata, and the pinned manifest.
@@ -134,8 +135,8 @@ Track A additionally:
 Track B additionally:
 
 - The dedicated benchmark RDS clone and S3 bucket exist and are reachable
-  (`README.md`; `.env.example`), and the read-only DB role is bootstrapped.
-  **Creating that infrastructure is documented in `README.md` and `infra/aws/`;
+  (`docs/reference/TOOLSET-REFERENCE.md`; `.env.example`), and the read-only DB role is bootstrapped.
+  **Creating that infrastructure is documented in `docs/reference/TOOLSET-REFERENCE.md` and `infra/aws/`;
   this manual assumes it already exists in your account.** A different account
   or operator cannot create it from this manual alone.
 - For the AWS fixture/secret scripts: AWS CLI v2, `jq`, and `psql` (a
@@ -433,7 +434,7 @@ reason. Never write credentials or full connection strings into a bundle.
 
 ## 10. Fresh-operator quickstart checklist
 
-- [ ] Read `README.md` and this manual.
+- [ ] Read `README.md`, `docs/reference/TOOLSET-REFERENCE.md`, and this manual.
 - [ ] Decide and record Track A or Track B.
 - [ ] Confirm the target (host alias, cluster context, or detached host).
 - [ ] Build the tools and verify `go test ./...`.
@@ -458,7 +459,7 @@ As of this review, the following are honest limits:
   method is documented.
 - **Track B assumes existing AWS resources.** The
   `codedang-iris-benchmark` RDS clone, S3 bucket, KMS key, and IAM roles are
-  created from `README.md`/`infra/aws/` and are account-specific. Another
+  created from `docs/reference/TOOLSET-REFERENCE.md`/`infra/aws/` and are account-specific. Another
   account must create its own.
 - **The Iris digest is a cache, not a resolution.** Without Docker/buildx you
   cannot re-resolve `ghcr.io/skkuding/codedang-iris:stage` from the repo alone.
