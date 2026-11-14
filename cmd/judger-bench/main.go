@@ -81,6 +81,8 @@ func run(args []string) error {
 		maxStack         = fs.Int64("max-stack", defaultMaxStackBytes, "max stack in bytes")
 		maxOutput        = fs.Int64("max-output-size", defaultMaxOutputBytes, "max output in bytes")
 		maxProcesses     = fs.Int("max-process-number", 0, "max process number (0 leaves Judger unlimited)")
+		stopFile         = fs.String("stop-file", "", "execute until this file exists; --iterations becomes an upper bound")
+		streamOutput     = fs.String("stream-output", "", "also append each execute sample as NDJSON as soon as it completes")
 	)
 	var envList, runArgs stringList
 	fs.Var(&envList, "env", "sandbox child environment KEY=VALUE (repeatable; default PATH)")
@@ -125,6 +127,8 @@ func run(args []string) error {
 		MaxProcessNumber:     *maxProcesses,
 		Env:                  envList,
 		RunArgs:              runArgs,
+		StopFile:             *stopFile,
+		StreamOutput:         *streamOutput,
 	}
 
 	samples, runErr := runBench(ctx, opt)

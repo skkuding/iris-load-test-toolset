@@ -104,6 +104,15 @@ type options struct {
 	MaxProcessNumber     int
 	Env                  []string
 	RunArgs              []string
+
+	// StopFile, when set, ends the execute loop before the next iteration once
+	// the file exists. Iterations then acts as an upper bound, letting an
+	// external coordinator keep every worker busy until all have enough
+	// samples inside the shared steady window.
+	StopFile string
+	// StreamOutput, when set, receives each execute sample as one NDJSON line
+	// as soon as it completes (a file, FIFO, or character device).
+	StreamOutput string
 }
 
 // sample is one NDJSON measurement record. It carries the raw Judger fields,
@@ -290,11 +299,25 @@ func runExecute(ctx context.Context, opt options) ([]sample, error) {
 		gid = defaultGID
 	}
 
-	samples := make([]sample, 0, opt.Iterations)
+	var stream *sampleStream
+	if opt.StreamOutput != "" {
+		stream, err = openSampleStream(opt.StreamOutput)
+		if err != nil {
+			return nil, err
+		}
+		defer stream.Close()
+	}
+
+	samples := make([]sample, 0, min(opt.Iterations, 1024))
 	var runErr error
 	for i := 0; i < opt.Iterations; i++ {
 		if err := ctx.Err(); err != nil {
 			return samples, err
+		}
+		if opt.StopFile != "" {
+			if _, err := os.Stat(opt.StopFile); err == nil {
+				break
+			}
 		}
 
 		inputPath := opt.Input
@@ -354,9 +377,37 @@ func runExecute(ctx context.Context, opt options) ([]sample, error) {
 			runErr = fmt.Errorf("iteration %d: sample status %s", i, s.Status)
 		}
 		samples = append(samples, s)
+		if stream != nil {
+			if err := stream.Write(s); err != nil {
+				return samples, fmt.Errorf("stream sample: %w", err)
+			}
+		}
 	}
 	return samples, runErr
 }
+
+// sampleStream writes one NDJSON line per sample with a single write call so
+// a line-oriented reader never observes a partial record from this writer.
+type sampleStream struct{ f *os.File }
+
+func openSampleStream(path string) (*sampleStream, error) {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("open stream output: %w", err)
+	}
+	return &sampleStream{f: f}, nil
+}
+
+func (w *sampleStream) Write(s sample) error {
+	b, err := json.Marshal(s)
+	if err != nil {
+		return err
+	}
+	_, err = w.f.Write(append(b, '\n'))
+	return err
+}
+
+func (w *sampleStream) Close() error { return w.f.Close() }
 
 // validateProductionCgroup accepts the stock alpha.4 sandbox that Judger
 // reports from its own cgroup view. A live alpha.4 reports the full filesystem
