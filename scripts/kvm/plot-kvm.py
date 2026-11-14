@@ -87,6 +87,43 @@ def main():
         fig.savefig(out / f"{phase}-band-by-flows.png", dpi=130)
         plt.close(fig)
 
+        # Paired comparison on identical CPUs: Vk (k, m) against B1 (k, m), or B0 m when k = 1.
+        idx = {(c["arm"], c["k"], c["m"], c["workload"]): c for c in cells}
+        fig, axes = plt.subplots(1, 2, figsize=(13, 5.5))
+        for wl, marker in zip(WORKLOADS, "o^sD"):
+            pairs = []
+            for (arm, k, m, w), c in idx.items():
+                if arm != "vk" or w != wl:
+                    continue
+                ref = idx.get(("b1", k, m, wl)) if k > 1 else idx.get(("b0", 1, m, wl))
+                if ref:
+                    pairs.append((ref, c))
+            if not pairs:
+                continue
+            axes[0].scatter([r["cpu"]["cv"] * 100 for r, _ in pairs], [c["cpu"]["cv"] * 100 for _, c in pairs],
+                            marker=marker, label=wl, alpha=0.75)
+            axes[1].scatter([r["flows"] for r, _ in pairs],
+                            [(c["cpu"]["median"] / r["cpu"]["median"] - 1) * 100 for r, c in pairs],
+                            marker=marker, label=wl, alpha=0.75)
+        lim = max(axes[0].get_xlim()[1], axes[0].get_ylim()[1])
+        axes[0].plot([0.1, lim], [0.1, lim], color="grey", lw=0.8, ls="--")
+        axes[0].set_xscale("log")
+        axes[0].set_yscale("log")
+        axes[0].set_xlabel("bare metal, same CPUs and grouping: CPU CV (%)")
+        axes[0].set_ylabel("Vk: CPU CV (%)")
+        axes[0].set_title("variance: above the diagonal = VM is noisier")
+        axes[1].axhline(0, color="grey", lw=0.8)
+        axes[1].set_xlabel("total execution flows")
+        axes[1].set_ylabel("Vk median vs bare metal, same layout (%)")
+        axes[1].set_title("overhead of the VM wrapper")
+        for ax in axes:
+            ax.grid(alpha=0.3)
+            ax.legend()
+        fig.suptitle(f"{phase}: Vk against bare metal on identical CPUs — {title}")
+        fig.tight_layout(rect=(0, 0, 1, 0.94))
+        fig.savefig(out / f"{phase}-vm-vs-bare.png", dpi=130)
+        plt.close(fig)
+
         fig, axes = plt.subplots(1, 4, figsize=(18, 4.5))
         for ax, wl in zip(axes, WORKLOADS):
             cs = {(c["k"], c["m"]): c["cpu"]["cv"] * 100 for c in cells if c["workload"] == wl and c["arm"] == "vk"}
