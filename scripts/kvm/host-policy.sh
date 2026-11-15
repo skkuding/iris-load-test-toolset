@@ -15,7 +15,11 @@ esac
 cur=$(cat /sys/devices/system/cpu/smt/control)
 [[ $cur == "$smt" ]] || echo "$smt" > /sys/devices/system/cpu/smt/control
 echo "$no_turbo" > /sys/devices/system/cpu/intel_pstate/no_turbo
-for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo performance > "$g"; done
+# Offline CPUs keep their cpufreq directory but reject writes (EBUSY).
+for c in /sys/devices/system/cpu/cpu[0-9]*; do
+  [[ -f $c/online && $(cat "$c/online") == 0 ]] && continue
+  echo performance > "$c/cpufreq/scaling_governor"
+done
 mountpoint -q /sys/fs/resctrl || mount -t resctrl resctrl /sys/fs/resctrl
 foreign=$(find /sys/fs/resctrl -mindepth 1 -maxdepth 1 -type d ! -name info ! -name mon_data ! -name mon_groups ! -name 'kvmexp-g*')
 [[ -z $foreign ]] || { echo "foreign resctrl groups: $foreign" >&2; exit 1; }
@@ -23,5 +27,5 @@ sleep 2
 printf 'policy=%s smt_active=%s no_turbo=%s governors=%s online=%s\n' "$policy" \
   "$(cat /sys/devices/system/cpu/smt/active)" \
   "$(cat /sys/devices/system/cpu/intel_pstate/no_turbo)" \
-  "$(sort -u /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor | tr '\n' ',')" \
+  "$(cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/dev/null | sort -u | tr '\n' ',')" \
   "$(cat /sys/devices/system/cpu/online)"
