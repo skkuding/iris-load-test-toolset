@@ -6,6 +6,7 @@ usage: plot-kvm.py summary.json <out-dir>
 Per phase it writes:
   <phase>-cv-by-vmcount.png   CPU-time CV against VM count m, one line per k
                               (Vk solid, Vk+1 dashed), B0 against flow count
+  <phase>-cv-by-flows.png     the same lines against total flows k·m
   <phase>-band-by-flows.png   CPU-time median and p05-p95 against total flows
                               for B0, B1, Vk and Vk+1
   <phase>-cv-heatmap.png      Vk CPU-time CV over k x m
@@ -60,6 +61,33 @@ def main():
         fig.suptitle(f"{phase}: CPU-time CV by VM count — {title}")
         fig.tight_layout(rect=(0, 0, 0.88, 0.96))
         fig.savefig(out / f"{phase}-cv-by-vmcount.png", dpi=130)
+        plt.close(fig)
+
+        # Same lines with x = total concurrent flows (k·m): shows that CV follows
+        # the total load on the socket rather than how flows are packed into VMs.
+        fig, axes = plt.subplots(2, 2, figsize=(13, 9), sharex=True)
+        for ax, wl in zip(axes.flat, WORKLOADS):
+            cs = [c for c in cells if c["workload"] == wl]
+            b0 = sorted((c["flows"], c["cpu"]["cv"] * 100) for c in cs if c["arm"] == "b0")
+            if b0:
+                ax.plot(*zip(*b0), color="black", marker="o", lw=2.5, label="B0", zorder=5)
+            for arm, ls in (("vk", "-"), ("vk1", "--")):
+                for k in range(1, 8):
+                    pts = sorted((c["flows"], c["cpu"]["cv"] * 100) for c in cs if c["arm"] == arm and c["k"] == k)
+                    if pts:
+                        ax.plot(*zip(*pts), ls=ls, marker=".", color=cmap((k - 1) / 6),
+                                label=f"{'Vk' if arm == 'vk' else 'Vk+1'} k={k}")
+            ax.set_title(wl)
+            ax.set_ylabel("CPU time CV (%)")
+            ax.set_yscale("symlog", linthresh=1)
+            ax.grid(alpha=0.3)
+        for ax in axes[1]:
+            ax.set_xlabel("total execution flows k·m (B0: flow count)")
+        h, l = axes[0, 0].get_legend_handles_labels()
+        fig.legend(h, l, loc="center right", fontsize=8)
+        fig.suptitle(f"{phase}: CPU-time CV by total flows — {title}")
+        fig.tight_layout(rect=(0, 0, 0.88, 0.96))
+        fig.savefig(out / f"{phase}-cv-by-flows.png", dpi=130)
         plt.close(fig)
 
         fig, axes = plt.subplots(2, 2, figsize=(13, 9), sharex=True)
