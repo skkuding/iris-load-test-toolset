@@ -130,3 +130,21 @@ max, p99/median, and the range of per-round medians. Relative columns:
 - `passes_1106_vs_own_solo`: the 2026-11-06 reference (tail drift ≤ 5 %,
   CV ≤ 5 %, zero failures). Reported only; the team has not adopted a
   threshold.
+
+## 2026-11-14 – 2026-11-16 result
+
+All 2,760 runs (p1 1,068, p2 492, p3a 816, p3b 384) completed with zero
+degraded runs and zero failed samples. Guest RAM was 4 KiB-backed in every
+run, guest steal and host vCPU wait stayed below 0.2 %, and per-cell medians
+varied by a median 0.3–0.6 % between rebooted rounds.
+
+**KVM did not reduce execution-time variance.** On identical CPUs and
+grouping, Vk's CPU-time CV matched bare metal (B1/B0) within about ±0.5 pp for
+`compute`, `chase44`, and `stream44`, and was slightly higher in most cells.
+Variance followed the total number of concurrent flows on socket 0 (SMT
+sibling sharing, L3 thrash, memory bandwidth), not the number of VMs or flows
+per VM. A spare vCPU (Vk+1) did not help, and per-group CAT behaved the same
+with and without VMs. The VM wrapper cost +0.7–2 % for most workloads and a
+consistent +15–19 % for the DRAM-latency workload (`chase44`, 4 KiB guest
+pages). Details, tables, and charts: `results/kvm-variance/report.md`,
+`tables.md`, `cells.csv`, and `charts/`.
