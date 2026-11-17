@@ -754,3 +754,80 @@ func TestMainFlagParsing(t *testing.T) {
 		t.Fatalf("run() = %v, want --output error", err)
 	}
 }
+
+func TestExecuteStopFileEndsLoopAndStreamsEachSample(t *testing.T) {
+	work := t.TempDir()
+	bin := filepath.Join(work, defaultBinaryName)
+	writeExecutable(t, bin, "#!/bin/sh\nexit 0\n")
+	parent := "/sys/fs/cgroup/bench.slice"
+	stop := filepath.Join(work, "stop")
+	counter := filepath.Join(work, "count")
+	// The fake Judger creates the stop file on its third invocation, so the
+	// loop must end after exactly three samples despite a large upper bound.
+	judger := writeScript(t, work, "judger.sh", "#!/bin/sh\n"+
+		"n=$(cat "+shellQuote(counter)+" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "+shellQuote(counter)+"\n"+
+		"for a in \"$@\"; do case \"$a\" in --output_path=*) printf 'judger-stdout\\n' > \"${a#--output_path=}\";; esac; done\n"+
+		"[ $n -ge 3 ] && : > "+shellQuote(stop)+"\n"+
+		"printf '%s' "+shellQuote(judgerJSON(parent+"/sandbox-abc/box-1", 0, 0))+"\n")
+	stream := filepath.Join(work, "stream.ndjson")
+
+	samples, err := runBench(context.Background(), options{
+		Mode:                 modeExecute,
+		Binary:               bin,
+		WorkDir:              work,
+		ExpectedOutput:       expectedOutput(t, work),
+		Iterations:           1000,
+		JudgerPath:           judger,
+		ContainerID:          "abc",
+		ExpectedCgroupParent: parent,
+		Timeout:              3 * time.Second,
+		StopFile:             stop,
+		StreamOutput:         stream,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(samples) != 3 {
+		t.Fatalf("samples = %d, want 3", len(samples))
+	}
+	lines := readLines(t, stream)
+	if len(lines) != 3 {
+		t.Fatalf("streamed lines = %d, want 3", len(lines))
+	}
+	for i, l := range lines {
+		var s sample
+		if err := json.Unmarshal([]byte(l), &s); err != nil {
+			t.Fatalf("line %d: %v", i, err)
+		}
+		if s.Iteration != i || s.Status != "success" {
+			t.Fatalf("line %d = %+v", i, s)
+		}
+	}
+}
+
+func TestExecuteStopFilePresentBeforeStartRunsNothing(t *testing.T) {
+	work := t.TempDir()
+	bin := filepath.Join(work, defaultBinaryName)
+	writeExecutable(t, bin, "#!/bin/sh\nexit 0\n")
+	parent := "/sys/fs/cgroup/bench.slice"
+	stop := filepath.Join(work, "stop")
+	if err := os.WriteFile(stop, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	judger := writeFakeJudger(t, work, filepath.Join(work, "args"), judgerJSON(parent+"/sandbox-abc/box-1", 0, 0))
+	samples, err := runBench(context.Background(), options{
+		Mode:                 modeExecute,
+		Binary:               bin,
+		WorkDir:              work,
+		ExpectedOutput:       expectedOutput(t, work),
+		Iterations:           5,
+		JudgerPath:           judger,
+		ContainerID:          "abc",
+		ExpectedCgroupParent: parent,
+		Timeout:              3 * time.Second,
+		StopFile:             stop,
+	})
+	if err != nil || len(samples) != 0 {
+		t.Fatalf("samples = %d, err = %v; want none", len(samples), err)
+	}
+}
